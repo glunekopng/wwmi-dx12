@@ -234,7 +234,7 @@ try {
     Set-EngineCvars
     $start = New-Object Diagnostics.ProcessStartInfo
     $start.FileName = $exe
-    $start.Arguments = "-krqlv=$tier -dx12 -SkipSplash"
+    $start.Arguments = "-krqlv=$tier -dx12"
     $start.WorkingDirectory = $root
     [void][Diagnostics.Process]::Start($start)
     $t0 = Get-Date
