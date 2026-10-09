@@ -32,6 +32,8 @@ engine with the game in **DirectX 12**, on the WWMI folder and mods you already 
 ## What it can't do yet
 
 - **Ray tracing** - with it on, the add-on switches itself off and says so
+- **UHD resources** - with the game's UHD resources installed, many mod textures stay vanilla: UHD ships
+  the game's textures re-encoded, under hashes no mod lists. HD resources work.
 - **Constant buffer regions** - binding part of a buffer as a constant buffer
   (`vs-cb0 = ref ResourceFoo->Region($offset, $size)`, XXSetConstantBuffers1) is skipped and logged once;
   no WWMI mod is known to use it
@@ -129,6 +131,8 @@ at the first start like a shared file.
 ## Plans
 
 - **Ray tracing**, next.
+- **UHD resources** - recognising a texture by how it looks rather than by its hash, so mods work on
+  UHD too.
 - Performance, where it can still move.
 - **Easier setup** - a streamlined install and a better launcher.
 - **Shared texture matches** - an automatically updated seed of learned texture matches, so mods look
