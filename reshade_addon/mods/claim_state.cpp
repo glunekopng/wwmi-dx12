@@ -178,11 +178,11 @@ static void CollectBoundModTexHashes(command_list* cmd_list, uint32_t* out, int 
     const TexRules& tr = TexRulesNow();
     if (tr.targets.empty()) return;
     PROF(PROF_DI_TexScan); // the per-draw table walk behind char_tex
-    const auto& tabs = CmdGfx(cmd_list).tables;
+    const auto& root = CmdGfx(cmd_list).root;
     uint32_t    scan_len[64];
     LayoutTexScanLens(CmdGfxLayout(cmd_list), scan_len);
     for (int p = 0; p < 64; ++p) {
-        const TableStart ts = TableStartOf(cmd_list->get_device(), tabs[p]);
+        const TableStart ts = TableStartOf(cmd_list->get_device(), root[p].table);
         if (!ts) continue;
         uint32_t        num = ts.Heap()->GetDesc().NumDescriptors;
         ID3D12Resource* res[kTexScanMax];

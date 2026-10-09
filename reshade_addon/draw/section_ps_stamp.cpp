@@ -95,7 +95,7 @@ void StampSectionPsSlots(command_list* cmd_list, uint32_t gen0, const std::vecto
         }
         memcpy(t_ps, it->second.t_ps, sizeof t_ps);
     }
-    const auto&       tabs = CmdGfx(cmd_list).tables;
+    const auto&       root = CmdGfx(cmd_list).root;
     const UINT        inc = g_d3d12_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     const DxilSrvRegs ps_regs = PipelineSrvRegs(CmdGfx(cmd_list).gfx_pso, 'p'); // the null descriptor's dimension
     for (unsigned r = 0; r < MigotoPort::kMaxSRV; ++r) {
@@ -126,7 +126,7 @@ void StampSectionPsSlots(command_list* cmd_list, uint32_t gen0, const std::vecto
                     dm, comp, r, (unsigned long long)layh, (unsigned)b.param);
             continue;
         }
-        const TableStart ts = TableStartOf(dev, tabs[b.param]);
+        const TableStart ts = TableStartOf(dev, root[b.param].table);
         if (!ts) continue;
         ID3D12DescriptorHeap* heap = ts.Heap();
         const uint32_t        slot = ts.base + b.offset;

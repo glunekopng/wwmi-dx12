@@ -45,8 +45,8 @@ void DispatchDiagShapekey(const DispatchArgs& da)
             uint32_t        u0bytes = 0; // cached size of the resolved u0 buffer (never GetDesc a cached ptr)
             if (u0root >= 0 && u0root < 64) {
                 auto& st = CmdGfx(cmd_list);
-                if (st.root_desc_type[u0root] == 3) {
-                    u0res = st.root_res[u0root];
+                if (st.root[u0root].desc_type == 3) {
+                    u0res = st.root[u0root].res;
                     via = "root";
                 }
             }
@@ -57,7 +57,7 @@ void DispatchDiagShapekey(const DispatchArgs& da)
                     descriptor_table dt = {};
                     {
                         auto& st = CmdGfx(cmd_list);
-                        dt = ComputeTable(st, u0t.param);
+                        dt = st.root[u0t.param].compute_table();
                     }
                     if (dt.handle) {
                         descriptor_heap uheap = { 0 };
@@ -84,7 +84,7 @@ void DispatchDiagShapekey(const DispatchArgs& da)
                         descriptor_table dtab = {};
                         {
                             auto& s = CmdGfx(cmd_list);
-                            dtab = ComputeTable(s, prm);
+                            dtab = s.root[prm].compute_table();
                         }
                         if (!dtab.handle) continue;
                         char line[1024];
@@ -162,8 +162,8 @@ void DispatchDiagMorph(const DispatchArgs& da)
             auto it = &CmdGfx(cmd_list);
             if (it != nullptr)
                 for (uint32_t p = 0; p < 64; ++p)
-                    if (it->tables[p].handle) {
-                        dtabs[ntab] = it->tables[p];
+                    if (it->root[p].table.handle) {
+                        dtabs[ntab] = it->root[p].table;
                         if (++ntab >= 64) break;
                     }
         }
@@ -204,10 +204,10 @@ void DispatchDiagMorph(const DispatchArgs& da)
             auto si = &CmdGfx(cmd_list);
             if (si != nullptr) {
                 for (int p = 0; p < 64 && o < 820; ++p)
-                    if (si->root_va[p]) o += snprintf(buf + o, sizeof(buf) - o, "rootVA[%d] ", p);
+                    if (si->root[p].va) o += snprintf(buf + o, sizeof(buf) - o, "rootVA[%d] ", p);
                 for (int p = 0; p < 64 && o < 780; ++p) {
-                    if (!si->tables[p].handle) continue;
-                    const TableStart ts = TableStartOf(dev, si->tables[p]);
+                    if (!si->root[p].table.handle) continue;
+                    const TableStart ts = TableStartOf(dev, si->root[p].table);
                     o += snprintf(buf + o, sizeof(buf) - o, "tbl[%d]@%llx+%u ", p, (unsigned long long)ts.heap, ts.base);
                 }
             }
@@ -260,7 +260,7 @@ void DispatchDiagSkinProbe(const DispatchArgs& da, const CmdState& state)
             {
                 std::lock_guard lm(g_mem_mutex);
                 for (int p = 0; p < 64 && o < 760; ++p) {
-                    uint64_t rv = state.root_va[p];
+                    uint64_t rv = state.root[p].va;
                     if (!rv) continue;
                     auto     it = g_va_to_res.find(rv);
                     uint32_t sz = it != g_va_to_res.end() ? it->second.size : 0;
@@ -279,7 +279,7 @@ void DispatchDiagSkinProbe(const DispatchArgs& da, const CmdState& state)
             {
                 auto* dev = cmd_list->get_device();
                 for (uint32_t p = 0; p < 16 && o < 940; ++p) {
-                    const auto       tbl = ComputeTable(state, p);
+                    const auto       tbl = state.root[p].compute_table();
                     const TableStart ts = TableStartOf(dev, tbl);
                     if (!ts) continue;
                     for (uint32_t i = 0; i < 64 && o < 940; ++i) {
@@ -331,10 +331,10 @@ void DispatchDiagSkinBlueprint(const DispatchArgs& da, const CmdState& state)
         uint64_t rt_out = 0;
         if ((isSkin || RtBonesWindowOpen()) && RtSkinOutCount()) {
             for (int p = 0; p < 64 && !rt_out; ++p)
-                if (state.root_va[p] && RtIsSkinOut(state.root_va[p], 1)) rt_out = state.root_va[p];
+                if (state.root[p].va && RtIsSkinOut(state.root[p].va, 1)) rt_out = state.root[p].va;
             auto* dev = cmd_list->get_device();
             for (uint32_t p = 0; p < 16 && !rt_out; ++p) {
-                const auto       tbl = ComputeTable(state, p);
+                const auto       tbl = state.root[p].compute_table();
                 const TableStart ts = TableStartOf(dev, tbl);
                 if (!ts) continue;
                 for (uint32_t i = 0; i < 24 && !rt_out; ++i) {
@@ -381,7 +381,7 @@ void DispatchDiagSkinBlueprint(const DispatchArgs& da, const CmdState& state)
                 {
                     std::lock_guard lm(g_mem_mutex);
                     for (int p = 0; p < 64 && o < 2000; ++p) {
-                        uint64_t rv = state.root_va[p];
+                        uint64_t rv = state.root[p].va;
                         if (!rv) continue;
                         auto        it = g_va_to_res.find(rv);
                         uint32_t    sz = it != g_va_to_res.end() ? it->second.size : 0;
@@ -394,7 +394,7 @@ void DispatchDiagSkinBlueprint(const DispatchArgs& da, const CmdState& state)
                 {
                     auto* dev = cmd_list->get_device();
                     for (uint32_t p = 0; p < 16 && o < 3800; ++p) {
-                        const auto       tbl = ComputeTable(state, p); // compute set
+                        const auto       tbl = state.root[p].compute_table(); // compute set
                         const TableStart ts = TableStartOf(dev, tbl);
                         if (!ts) continue;
                         for (uint32_t i = 0; i < 24 && o < 3800; ++i) {
@@ -424,7 +424,7 @@ void DispatchDiagStalker(const DispatchArgs& da, const CmdState& state)
     if (is_skin_cs && g_debug) {
         for (uint32_t p = 0; p < 16; ++p) {
             // is_skin_cs path -- compute set.
-            const auto tbl = ComputeTable(state, p);
+            const auto tbl = state.root[p].compute_table();
             if (tbl.handle != 0) {
                 const TableStart ts = TableStartOf(cmd_list->get_device(), tbl);
                 if (ts) {

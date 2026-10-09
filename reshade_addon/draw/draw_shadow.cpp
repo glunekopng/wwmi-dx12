@@ -88,7 +88,7 @@ void RecogniseShadowPass(const DrawArgs& da, BoneRoots& roots, DrawClaim& dc)
                             vs_hash, first_index, index_count, b4r, b3r, (unsigned long long)b4_cb.va);
                         uint64_t dvb0 = 0;
                         {
-                            dvb0 = CmdGfx(cmd_list).vb_va[0];
+                            dvb0 = CmdGfx(cmd_list).vb[0].va;
                         }
                         bool d_pool = InSkinBand(dvb0);
                         logger::trace("SKINSRC pass=DEPTHCAST idx=%u vb0=%llx inSkinPool=%d b4root=%d boneVA=%llx",

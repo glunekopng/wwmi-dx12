@@ -55,7 +55,7 @@ void PublishGameTexturesForDump(command_list* cmd_list)
         }
         rm = it->second;
     }
-    const auto&       tabs = CmdGfx(cmd_list).tables;
+    const auto&       root = CmdGfx(cmd_list).root;
     const unsigned    di = MigotoPort::FrameAnalysisDrawIndex();
     const bool        swap_live = g_global_tex && !g_disable_tex && g_texovr_ready; // GlobalTexSwap's own gate
     const uint64_t    pso = CmdGfx(cmd_list).gfx_pso;
@@ -74,7 +74,7 @@ void PublishGameTexturesForDump(command_list* cmd_list)
             const RegBind& b = regs[r];
             if (b.param == 0xFF || b.param >= 64 || !b.is_table) continue; // a root SRV is a buffer, not a texture
             if (!bound.reads(r)) continue;                                 // declared by the layout, never read by the shader
-            const TableStart ts = TableStartOf(dev, tabs[b.param]);
+            const TableStart ts = TableStartOf(dev, root[b.param].table);
             if (!ts) continue;
             const uint32_t slot = ts.base + b.offset;
             ResInfo        ri;
@@ -134,7 +134,7 @@ uint64_t X27ResolveVsCbs(command_list* cmd_list, X27Cb out[8])
     for (int r = 0; r < 8; ++r) out[r] = X27Cb{};
     uint64_t layh = 0;
     layh = CmdGfxLayout(cmd_list);
-    const auto& tabs = CmdGfx(cmd_list).tables;
+    const auto& root = CmdGfx(cmd_list).root;
     if (!layh) return 0;
     RegBind rb[8];
     {
@@ -159,7 +159,7 @@ uint64_t X27ResolveVsCbs(command_list* cmd_list, X27Cb out[8])
         }
         o.kind = 3;
         if (!dev) continue;
-        const TableStart ts = TableStartOf(dev, tabs[o.param]);
+        const TableStart ts = TableStartOf(dev, root[o.param].table);
         HeapCbv          hc;
         if (ts && g_heap_cbv.find({ ts.heap, ts.base + o.off }, hc)) {
             o.kind = 2;
@@ -205,15 +205,15 @@ void PublishGameDrawForDump(command_list* cmd_list, bool injected,
     {
         auto const& gs = CmdGfx(cmd_list);
         for (unsigned s = 0; s < 8; ++s) {
-            gva[s] = gs.vb_va[s];
-            gsz[s] = gs.vb_size[s];
-            gstr[s] = gs.vb_stride[s];
-            gres[s] = gs.vb_res[s];
+            gva[s] = gs.vb[s].va;
+            gsz[s] = gs.vb[s].size;
+            gstr[s] = gs.vb[s].stride;
+            gres[s] = gs.vb[s].res;
         }
-        ib_va = gs.ib_va;
-        ib_size = gs.ib_size;
-        ib_bytes = gs.ib_index_bytes;
-        ib_res = gs.ib_res;
+        ib_va = gs.ib.va;
+        ib_size = gs.ib.size;
+        ib_bytes = gs.ib.index_bytes;
+        ib_res = gs.ib.res;
         pso = gs.gfx_pso;
     }
     // A CmdGfx pointer is a bind-time record, not a reference: accept it only while the VA maps still know it.

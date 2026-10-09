@@ -134,7 +134,7 @@ void DiagOnDrawIndexed(command_list* cmd_list, ID3D12GraphicsCommandList*,
     if (MigotoPort::FrameAnalysisArmed() && !fd_claimed) {
         uint64_t vb0 = 0;
         {
-            vb0 = CmdGfx(cmd_list).vb_va[0];
+            vb0 = CmdGfx(cmd_list).vb[0].va;
         }
         fd_charband = InSkinBand(vb0);
     }
@@ -157,7 +157,7 @@ void DiagOnDrawIndexed(command_list* cmd_list, ID3D12GraphicsCommandList*,
     if ((g_log_merged.load() > 0 || g_log_lod.load()) && index_count >= 64) {
         uint64_t vb0 = 0;
         {
-            vb0 = CmdGfx(cmd_list).vb_va[0];
+            vb0 = CmdGfx(cmd_list).vb[0].va;
         }
         bool char_pool = (vb0 >= 0x300000000ULL && vb0 < 0x400000000ULL);
         bool at_comp = (g_first_to_comp.find(FirstCountKey(first_index, index_count)) != g_first_to_comp.end());
@@ -188,7 +188,7 @@ void DiagOnDrawIndexed(command_list* cmd_list, ID3D12GraphicsCommandList*,
         // Tag character-pool draws: VB[0] VA inside the known skin-cache pool range
         uint64_t vb0 = 0;
         {
-            vb0 = CmdGfx(cmd_list).vb_va[0];
+            vb0 = CmdGfx(cmd_list).vb[0].va;
         }
         bool charPool = (vb0 >= 0x3f0000000ULL && vb0 < 0x400000000ULL); // CS output pool band
         logger::write("DRAW vs=%016llx first=%u count=%u vb0=%llx%s",
@@ -198,7 +198,7 @@ void DiagOnDrawIndexed(command_list* cmd_list, ID3D12GraphicsCommandList*,
     if (vs_hash == 0xbd50930e536be3eaULL || vs_hash == 0x1835840f4e3ff12aULL || vs_hash == 0xec783ffd78365180ULL) {
         auto const&     state = CmdGfx(cmd_list);
         std::lock_guard lock_vb(g_char_vb_mutex);
-        if (state.vb_va[0] != 0) g_char_vb_vas.insert(state.vb_va[0]);
+        if (state.vb[0].va != 0) g_char_vb_vas.insert(state.vb[0].va);
     }
 
     if (vs_hash == 0x1758b5d5982ddd63ULL || vs_hash == 0xbb0ac53ff09064e6ULL) {
@@ -206,11 +206,11 @@ void DiagOnDrawIndexed(command_list* cmd_list, ID3D12GraphicsCommandList*,
         if (DiagOnce("LODDIAG", (int)(lk ^ (lk >> 32)))) {
             auto const& st = CmdGfx(cmd_list);
             logger::write("LODDIAG vs=%016llx first=%u count=%u ib_va=%llx ib_bytes=%u",
-                vs_hash, first_index, index_count, st.ib_va, st.ib_index_bytes);
+                vs_hash, first_index, index_count, st.ib.va, st.ib.index_bytes);
             for (int s = 0; s < 8; ++s)
-                if (st.vb_va[s]) logger::write("  LODVB[%d] va=%llx stride=%u size=%u", s, st.vb_va[s], st.vb_stride[s], st.vb_size[s]);
+                if (st.vb[s].va) logger::write("  LODVB[%d] va=%llx stride=%u size=%u", s, st.vb[s].va, st.vb[s].stride, st.vb[s].size);
             for (int rp = 0; rp < 64; ++rp)
-                if (st.tables[rp].handle) logger::write("  LODTABLE root[%d] handle=%llx", rp, st.tables[rp].handle);
+                if (st.root[rp].table.handle) logger::write("  LODTABLE root[%d] handle=%llx", rp, st.root[rp].table.handle);
             auto cit = &CmdCbv(cmd_list);
             if (cit != nullptr) {
                 for (int rp = 0; rp < 64; ++rp) {

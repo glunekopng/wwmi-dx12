@@ -81,8 +81,8 @@ void DispatchCapture(const DispatchArgs& da, const SkU0Ident& ck, bool skip_disp
                 uint64_t        mva = 0;
                 {
                     auto& stx = CmdGfx(cmd_list);
-                    mres = stx.root_res[mroot];
-                    mva = stx.root_va[mroot];
+                    mres = stx.root[mroot].res;
+                    mva = stx.root[mroot].va;
                 }
                 std::lock_guard lock(g_mem_mutex);
                 mr.u0_why = 3;
@@ -110,7 +110,7 @@ void DispatchCapture(const DispatchArgs& da, const SkU0Ident& ck, bool skip_disp
                 descriptor_table mdt = {};
                 {
                     auto& stx = CmdGfx(cmd_list);
-                    mdt = ComputeTable(stx, mtbl.param);
+                    mdt = stx.root[mtbl.param].compute_table();
                 }
                 if (mdt.handle) {
                     if (mr.u0_why < 4 || mr.u0_why == 7) mr.u0_why = 8;

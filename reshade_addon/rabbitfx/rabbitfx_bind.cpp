@@ -113,7 +113,7 @@ static bool ResolveParam0Window(reshade::api::command_list* cmd_list, Param0Wind
     uint64_t layh = 0;
     {
         auto& s = CmdGfx(cmd_list);
-        for (int p = 0; p < 64; ++p) w.tabs[p] = s.tables[p];
+        for (int p = 0; p < 64; ++p) w.tabs[p] = s.root[p].table;
         layh = CmdGfxLayout(cmd_list);
     }
     if (!layh) return false;

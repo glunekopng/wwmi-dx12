@@ -41,14 +41,14 @@ bool InjectClaimedDraw(const DrawArgs& da, DrawClaim& dc)
         {
             auto& st = CmdGfx(cmd_list);
             for (int s = 0; s < 8; ++s) {
-                if (st.vb_va[s] && st.vb_stride[s] > 0) {
-                    save_vb[s] = { st.vb_va[s], st.vb_size[s], st.vb_stride[s] };
+                if (st.vb[s].va && st.vb[s].stride > 0) {
+                    save_vb[s] = { st.vb[s].va, st.vb[s].size, st.vb[s].stride };
                     save_vb_set[s] = true;
                 }
             }
-            if (st.ib_va && st.ib_index_bytes > 0) {
-                save_ib = { st.ib_va, st.ib_size,
-                    st.ib_index_bytes == 2 ? DXGI_FORMAT_R16_UINT : DXGI_FORMAT_R32_UINT };
+            if (st.ib.va && st.ib.index_bytes > 0) {
+                save_ib = { st.ib.va, st.ib.size,
+                    st.ib.index_bytes == 2 ? DXGI_FORMAT_R16_UINT : DXGI_FORMAT_R32_UINT };
                 save_ib_set = true;
             }
         }

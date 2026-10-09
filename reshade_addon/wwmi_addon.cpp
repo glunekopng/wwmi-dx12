@@ -168,10 +168,10 @@ static bool X23Begin(command_list* cmd_list, uint32_t index_count, uint32_t inst
         }
         r->stencil_ref = gs.stencil_ref;
         r->stencil_ref_set = gs.stencil_ref_set ? 1 : 0;
-        r->vb0_va = gs.vb_va[0];
-        r->vb6_va = gs.vb_va[6];
-        r->vb6_stride = gs.vb_stride[6];
-        r->ib_va = gs.ib_va;
+        r->vb0_va = gs.vb[0].va;
+        r->vb6_va = gs.vb[6].va;
+        r->vb6_stride = gs.vb[6].stride;
+        r->ib_va = gs.ib.va;
         const CmdRT& rt = CmdRt(cmd_list);
         if (rt.valid) {
             r->rtv_count = rt.rtv_count;

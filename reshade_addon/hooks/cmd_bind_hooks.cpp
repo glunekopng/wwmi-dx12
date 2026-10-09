@@ -40,18 +40,20 @@ void on_bind_pipeline(command_list* cmd_list, pipeline_stage type, pipeline pipe
 void on_bind_vertex_buffers(command_list* cmd_list, uint32_t first, uint32_t count, const resource* buffers, const uint64_t* offsets, const uint32_t* strides)
 {
     PROF(PROF_BindVB);
-    auto& state = CmdGfx(cmd_list);
-    for (uint32_t i = 0; i < count; ++i) {
-        if (first + i < 16 && buffers[i].handle != 0) {
-            ID3D12Resource* d3d12_res = reinterpret_cast<ID3D12Resource*>(buffers[i].handle);
-            const uint64_t  off = offsets ? offsets[i] : 0;
-            state.vb_va[first + i] = d3d12_res->GetGPUVirtualAddress() + off;
-            state.vb_res[first + i] = d3d12_res;
-            const UINT64 width = d3d12_res->GetDesc().Width;
-            state.vb_size[first + i] = (width > off) ? (uint32_t)(width - off) : 0u;
-            state.vb_res_width[first + i] = width;
-            state.vb_stride[first + i] = strides ? strides[i] : 0;
-        }
+    auto&          state = CmdGfx(cmd_list);
+    const uint32_t n = first < 16 ? std::min<uint32_t>(count, 16 - first) : 0;
+    for (uint32_t i = 0; i < n; ++i) {
+        if (buffers[i].handle == 0) continue;
+        ID3D12Resource* d3d12_res = reinterpret_cast<ID3D12Resource*>(buffers[i].handle);
+        const uint64_t  off = offsets ? offsets[i] : 0;
+        const UINT64    width = d3d12_res->GetDesc().Width;
+        state.vb[first + i] = {
+            .va = d3d12_res->GetGPUVirtualAddress() + off,
+            .size = (width > off) ? (uint32_t)(width - off) : 0u,
+            .stride = strides ? strides[i] : 0,
+            .res = d3d12_res,
+            .res_width = width,
+        };
     }
 }
 
@@ -62,13 +64,15 @@ void on_bind_index_buffer(command_list* cmd_list, resource buffer, uint64_t offs
     auto& state = CmdGfx(cmd_list);
     if (buffer.handle != 0) {
         auto* d3d12_res = reinterpret_cast<ID3D12Resource*>(buffer.handle);
-        state.ib_va = d3d12_res->GetGPUVirtualAddress() + offset;
-        state.ib_size = (uint32_t)d3d12_res->GetDesc().Width - (uint32_t)offset;
-        state.ib_index_bytes = index_size; // 2 or 4
-        state.ib_res = d3d12_res;
+        state.ib = {
+            .va = d3d12_res->GetGPUVirtualAddress() + offset,
+            .size = (uint32_t)d3d12_res->GetDesc().Width - (uint32_t)offset,
+            .index_bytes = index_size, // 2 or 4
+            .res = d3d12_res,
+        };
     } else {
-        state.ib_va = 0;
-        state.ib_res = nullptr;
+        state.ib.va = 0;
+        state.ib.res = nullptr;
     }
 }
 
@@ -186,9 +190,9 @@ bool ResolveBound(command_list* cmd_list, char stage, TargetClass kind, uint32_t
             va = cb.va;
             sz = cb.size;
         } else {
-            auto& st = CmdGfx(cmd_list);
-            res = st.root_res[rb.param];
-            va = st.root_va[rb.param];
+            const RootParam& rp = CmdGfx(cmd_list).root[rb.param];
+            res = rp.res;
+            va = rp.va;
         }
         if (trace) trace->res = res;
         if (!res && !va) return fail(6);
@@ -216,11 +220,8 @@ bool ResolveBound(command_list* cmd_list, char stage, TargetClass kind, uint32_t
     }
 
     // DESCRIPTOR TABLE: the bound table for that root param, plus the offset the layout declared.
-    descriptor_table dt = {};
-    {
-        auto& st = CmdGfx(cmd_list);
-        dt = (stage == 'c' && st.ctables[rb.param].handle) ? st.ctables[rb.param] : st.tables[rb.param];
-    }
+    const RootParam&       rp = CmdGfx(cmd_list).root[rb.param];
+    const descriptor_table dt = (stage == 'c') ? rp.compute_table() : rp.table;
     if (!dt.handle) return fail(8);
     descriptor_heap heap = { 0 };
     uint32_t        slot = 0;
@@ -275,11 +276,11 @@ void on_push_descriptors(command_list* cmd_list, shader_stage stages, pipeline_l
     if (update.type == descriptor_type::shader_resource_view || update.type == descriptor_type::unordered_access_view) {
         resource res = cmd_list->get_device()->get_resource_from_view(static_cast<const resource_view*>(update.descriptors)[0]);
         if (res.handle != 0) {
-            auto* d3d12_res = reinterpret_cast<ID3D12Resource*>(res.handle);
-            auto& st = CmdGfx(cmd_list);
-            st.root_va[layout_param] = d3d12_res->GetGPUVirtualAddress();
-            st.root_res[layout_param] = d3d12_res;                                                             // offset-proof identity for the morph matcher
-            st.root_desc_type[layout_param] = (update.type == descriptor_type::unordered_access_view) ? 3 : 2; // SRV=2, UAV=3
+            auto*      d3d12_res = reinterpret_cast<ID3D12Resource*>(res.handle);
+            RootParam& rp = CmdGfx(cmd_list).root[layout_param];
+            rp.va = d3d12_res->GetGPUVirtualAddress();
+            rp.res = d3d12_res;
+            rp.desc_type = (update.type == descriptor_type::unordered_access_view) ? 3 : 2; // SRV=2, UAV=3
         }
     } else if (update.type == descriptor_type::constant_buffer) {
         // CBV: descriptors point to buffer_range records (resource + offset + size)
@@ -320,8 +321,7 @@ void on_reset_command_list(command_list* cmd_list)
     CmdBlock*       b = g_cmd_blocks.get(key);
     if (b) {
         ++b->gen; // a new recording (CmdGen): independent of the clear A/B below
-        b->heaps.fresh[0] = false;
-        b->heaps.fresh[1] = false;
+        for (HeapBind& hb : b->heaps) hb.fresh = false;
     }
     if (!g_cmd_reset_clears) return;
     if (b) {
@@ -338,8 +338,8 @@ static void NoteGameHeap(command_list* cmd_list, uint64_t h)
 {
     if (!h) return;
     CmdHeaps& hs = CmdHeap(cmd_list);
-    for (int k = 0; k < 2; ++k)
-        if (hs.fresh[k] && h >= hs.lo[k] && h < hs.hi[k]) return;
+    for (const HeapBind& hb : hs)
+        if (hb.fresh && h >= hb.lo && h < hb.hi) return;
     descriptor_heap dh = { 0 };
     uint32_t        base = 0;
     cmd_list->get_device()->get_descriptor_heap_offset({ h }, 0, 0, &dh, &base);
@@ -349,48 +349,44 @@ static void NoteGameHeap(command_list* cmd_list, uint64_t h)
     const int                        k = d.Type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV ? 0 : d.Type == D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER ? 1
                                                                                                                                              : -1;
     if (k < 0) return;
-    auto* dev = reinterpret_cast<ID3D12Device*>(cmd_list->get_device()->get_native());
-    hs.heap[k] = heap;
-    hs.lo[k] = heap->GetGPUDescriptorHandleForHeapStart().ptr;
-    hs.hi[k] = hs.lo[k] + (uint64_t)d.NumDescriptors * dev->GetDescriptorHandleIncrementSize(d.Type);
-    hs.fresh[k] = true;
+    auto*          dev = reinterpret_cast<ID3D12Device*>(cmd_list->get_device()->get_native());
+    const uint64_t lo = heap->GetGPUDescriptorHandleForHeapStart().ptr;
+    hs[k] = { .heap = heap, .lo = lo, .hi = lo + (uint64_t)d.NumDescriptors * dev->GetDescriptorHandleIncrementSize(d.Type), .fresh = true };
 }
 
 ID3D12DescriptorHeap* GameHeap(command_list* cmd_list, int type)
 {
-    CmdHeaps& hs = CmdHeap(cmd_list);
-    if (!hs.heap[type]) return nullptr;
-    if (hs.fresh[type]) return hs.heap[type];
+    HeapBind& hb = CmdHeap(cmd_list)[type];
+    if (!hb.heap) return nullptr;
+    if (hb.fresh) return hb.heap;
     descriptor_heap dh = { 0 };
     uint32_t        base = 0;
-    cmd_list->get_device()->get_descriptor_heap_offset({ hs.lo[type] }, 0, 0, &dh, &base);
-    if (dh.handle != reinterpret_cast<uint64_t>(hs.heap[type])) {
-        hs.heap[type] = nullptr;
-        hs.lo[type] = 0;
-        hs.hi[type] = 0;
+    cmd_list->get_device()->get_descriptor_heap_offset({ hb.lo }, 0, 0, &dh, &base);
+    if (dh.handle != reinterpret_cast<uint64_t>(hb.heap)) {
+        hb = {};
         return nullptr;
     }
     if (g_debug && DiagOnce("HEAPCARRY", type))
         logger::write("HEAPCARRY: no %s table bound yet in this recording -- the heap this list used last time is still alive and is the one restored",
             type ? "sampler" : "CBV_SRV_UAV");
-    return hs.heap[type];
+    return hb.heap;
 }
 
-void on_bind_descriptor_tables(command_list* cmd_list, shader_stage stages, pipeline_layout layout, uint32_t first, uint32_t count, const descriptor_table* tables)
+void on_bind_descriptor_tables(command_list* cmd_list, shader_stage stages, [[maybe_unused]] pipeline_layout layout, uint32_t first, uint32_t count, const descriptor_table* tables)
 {
     PROF(PROF_BindDescTables);
     if (g_addon_disabled) return;
-    auto&      state = CmdGfx(cmd_list);
-    const bool to_compute = ((uint32_t)(stages & shader_stage::all_compute) != 0);
-    for (uint32_t i = 0; i < count; ++i) {
-        if (first + i >= 64) continue;
-        state.tables[first + i] = tables[i];
+    auto&          state = CmdGfx(cmd_list);
+    const bool     to_compute = ((uint32_t)(stages & shader_stage::all_compute) != 0);
+    const uint32_t n = first < 64 ? std::min<uint32_t>(count, 64 - first) : 0;
+    for (uint32_t i = 0; i < n; ++i) {
+        RootParam& rp = state.root[first + i];
+        rp.table = tables[i];
         NoteGameHeap(cmd_list, tables[i].handle);
-        if (to_compute) {
-            state.ctables[first + i] = tables[i];
-            state.ctab_layout[first + i] = layout.handle; // the signature this binding belongs to
-            state.ctab_frame[first + i] = g_frame_id;
-            state.ctab_seq[first + i] = ++state.ctab_seq_next;
-        }
+        if (!to_compute) continue;
+        rp.ctable = tables[i];
+#ifdef WWMI_DEBUG
+        rp.ctable_note = { .layout = layout.handle, .frame = g_frame_id, .seq = ++state.ctable_seq_next };
+#endif
     }
 }

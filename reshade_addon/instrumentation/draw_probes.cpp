@@ -25,7 +25,7 @@ void DrawProbesClaim(const DrawArgs& da, DrawClaim& dc)
             if (ProbeArmed() && DiagOnce("DRAW-FIRSTCOUNT", (int)(k ^ (k >> 32)))) {
                 uint64_t vb0dbg = 0;
                 {
-                    vb0dbg = CmdGfx(cmd_list).vb_va[0];
+                    vb0dbg = CmdGfx(cmd_list).vb[0].va;
                 }
                 logger::trace("CLAIMHIT comp first=%u count=%u vs=%016llx vb0=%llx claimed=%d",
                     first_index, index_count, vs_hash, vb0dbg, (int)(mc != nullptr));
@@ -40,12 +40,12 @@ void DrawProbesClaim(const DrawArgs& da, DrawClaim& dc)
                     uint32_t        vstride = 0;
                     {
                         auto& st = CmdGfx(cmd_list);
-                        ibr = st.ib_res;
-                        ibva = st.ib_va;
-                        if (st.ib_index_bytes) idxb = st.ib_index_bytes;
-                        vbr = st.vb_res[0];
-                        vbva = st.vb_va[0];
-                        vstride = st.vb_stride[0];
+                        ibr = st.ib.res;
+                        ibva = st.ib.va;
+                        if (st.ib.index_bytes) idxb = st.ib.index_bytes;
+                        vbr = st.vb[0].res;
+                        vbva = st.vb[0].va;
+                        vstride = st.vb[0].stride;
                     }
                     if (ibr && vbr && maxEnd && vstride) {
                         uint32_t                  iboff = (uint32_t)(ibva - ibr->GetGPUVirtualAddress());
@@ -79,7 +79,7 @@ void DrawProbesPasses(const DrawArgs& da, BoneRoots& roots, DrawClaim& dc)
     const CmdRT&                      draw_rt = da.draw_rt;
     MergedComp*&                      mc = dc.mc;
     if (g_debug && index_count >= 64 && ProbeArmed()) {
-        const uint64_t    vb0 = CmdGfx(cmd_list).vb_va[0];
+        const uint64_t    vb0 = CmdGfx(cmd_list).vb[0].va;
         const int         b4r = roots.Get().b4;
         const RootCbvBind b4cb = roots.Get().b4cb;
         bool              charish_vb = (vb0 >= 0x300000000ULL && vb0 < 0x400000000ULL);
@@ -162,7 +162,7 @@ void DrawProbesPasses(const DrawArgs& da, BoneRoots& roots, DrawClaim& dc)
             charUp = !g_char_mesh_vb0.empty();
         }
         if (charUp && index_count >= 32) {
-            const uint64_t    vb0 = CmdGfx(cmd_list).vb_va[0];
+            const uint64_t    vb0 = CmdGfx(cmd_list).vb[0].va;
             const RootCbvBind b4cb = roots.Get().b4cb;
             bool              boneNear = false;
             uint64_t          bdist = ~0ull;
@@ -207,7 +207,7 @@ void DrawProbesPasses(const DrawArgs& da, BoneRoots& roots, DrawClaim& dc)
     if (g_debug && index_count >= 32) {
         uint64_t vb0 = 0;
         {
-            vb0 = CmdGfx(cmd_list).vb_va[0];
+            vb0 = CmdGfx(cmd_list).vb[0].va;
         }
         bool skinlod = false;
         if (vb0) {
@@ -248,9 +248,9 @@ void DrawProbeVb6Reader(const DrawArgs& da, DrawClaim& dc)
         const CmdRT&    rt6 = draw_rt;
         {
             const auto& cg = CmdGfx(cmd_list);
-            r6 = cg.vb_res[6];
-            s6 = cg.vb_stride[6];
-            va0 = cg.vb_va[0];
+            r6 = cg.vb[6].res;
+            s6 = cg.vb[6].stride;
+            va0 = cg.vb[0].va;
         }
         RelocBuf rb6{};
         if (r6 && s6 && g_buffer_reloc.Resolve(r6, &rb6)) {
@@ -279,12 +279,12 @@ void DrawProbeOffLeak(const DrawArgs& da, DrawClaim& dc)
 {
     if (!g_debug || dc.mc || !TexOffWatching() || !ProbeArmed()) return;
     reshade::api::command_list* const cmd_list = da.cmd_list;
-    const auto&                       tabs = CmdGfx(cmd_list).tables;
+    const auto&                       root = CmdGfx(cmd_list).root;
     uint32_t                          scan_len[64];
     LayoutTexScanLens(CmdGfxLayout(cmd_list), scan_len);
     for (int p = 0; p < 64; ++p) {
-        if (tabs[p].handle == 0) continue;
-        const TableStart ts = TableStartOf(cmd_list->get_device(), tabs[p]);
+        if (root[p].table.handle == 0) continue;
+        const TableStart ts = TableStartOf(cmd_list->get_device(), root[p].table);
         if (!ts) continue;
         const uint32_t num = ts.Heap()->GetDesc().NumDescriptors;
         for (uint32_t s = 0; s < scan_len[p] && ts.base + s < num; ++s) {

@@ -17,8 +17,8 @@ bool SkU0ResourceNow(command_list* cmd_list, ID3D12Resource** res, unsigned* siz
         uint64_t        va = 0;
         {
             auto& stx = CmdGfx(cmd_list);
-            r = stx.root_res[root];
-            va = stx.root_va[root];
+            r = stx.root[root].res;
+            va = stx.root[root].va;
         }
         std::lock_guard lock(g_mem_mutex);
         if (r) {
@@ -39,7 +39,7 @@ bool SkU0ResourceNow(command_list* cmd_list, ID3D12Resource** res, unsigned* siz
     descriptor_table dt = {};
     {
         auto& stx = CmdGfx(cmd_list);
-        dt = ComputeTable(stx, tbl.param);
+        dt = stx.root[tbl.param].compute_table();
     }
     if (!dt.handle) return false;
     descriptor_heap heap = { 0 };
@@ -74,18 +74,19 @@ static bool SkU0Record(command_list* cmd_list, uint64_t cs_hash,
     if (have && u0t.param < 64) {
         descriptor_table dt = {};
         {
-            auto& stx = CmdGfx(cmd_list);
-            dt = ComputeTable(stx, u0t.param);
-            if (stx.ctables[u0t.param].handle && stx.ctab_frame[u0t.param]) {
-                ck.ct_match = (stx.ctab_layout[u0t.param] == ck.layout) ? 1 : 0;
-                ck.ct_age = (int)(g_frame_id - stx.ctab_frame[u0t.param]);
-                ck.ct_seqd = (int)(stx.ctab_seq_next - stx.ctab_seq[u0t.param]);
+            auto&            stx = CmdGfx(cmd_list);
+            const RootParam& rp = stx.root[u0t.param];
+            dt = rp.compute_table();
+            if (rp.ctable.handle && rp.ctable_note.frame) {
+                ck.ct_match = (rp.ctable_note.layout == ck.layout) ? 1 : 0;
+                ck.ct_age = (int)(g_frame_id - rp.ctable_note.frame);
+                ck.ct_seqd = (int)(stx.ctable_seq_next - rp.ctable_note.seq);
             }
             // DEBUG ONLY: these three feed the heartbeat's U0TABLE line and nothing else.
             if (g_debug) {
-                if (stx.ctables[u0t.param].handle)
+                if (rp.ctable.handle)
                     g_u0tab_compute.fetch_add(1, std::memory_order_relaxed);
-                else if (stx.tables[u0t.param].handle)
+                else if (rp.table.handle)
                     g_u0tab_fallback.fetch_add(1, std::memory_order_relaxed);
                 else
                     g_u0tab_none.fetch_add(1, std::memory_order_relaxed);

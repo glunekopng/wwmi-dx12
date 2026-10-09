@@ -252,7 +252,7 @@ void Close()
                "#                      4 EXTENT-0-RESOURCE-NOT-LIVE (g_res_to_va miss), 5 recovery tried.\n"
                "# ct_match:     WAS THE TABLE WE READ THE ONE THIS DISPATCH BOUND? 1 yes; 0 NO -- it was\n"
                "#               bound under a DIFFERENT compute root signature. D3D12 DISCARDS every root\n"
-               "#               table binding on a signature change, and ctables[] is never invalidated, so\n"
+               "#               table binding on a signature change, and root[].ctable is never invalidated, so\n"
                "#               a 0 means ck_off/heap/slot were derived from a binding the GPU no longer\n"
                "#               has and the resource they name is a coincidence. -1 = param never bound.\n"
                "#               ct_age = frames since that bind (0 = this frame). ct_seqd = binds on this\n"

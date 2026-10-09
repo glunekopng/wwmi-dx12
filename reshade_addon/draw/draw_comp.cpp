@@ -255,7 +255,7 @@ static uint16_t PublishSectionTextures(reshade::api::command_list* cmd_list, int
         memcpy(t_ps, it->second.t_ps, sizeof t_ps);
     }
     device*           dev = cmd_list->get_device();
-    const auto&       tabs = CmdGfx(cmd_list).tables;
+    const auto&       root = CmdGfx(cmd_list).root;
     const DxilSrvRegs ps_regs = PipelineSrvRegs(CmdGfx(cmd_list).gfx_pso, 'p');
     uint16_t          pushed = 0;
     for (unsigned r = 0; r < kSectionTexRegs; ++r) {
@@ -263,7 +263,7 @@ static uint16_t PublishSectionTextures(reshade::api::command_list* cmd_list, int
         if (b.param == 0xFF || b.param >= 64 || !b.is_table) continue;
         const bool read = ps_regs.reads(r);
         if (!read && !g_debug) continue;
-        const TableStart ts = TableStartOf(dev, tabs[b.param]);
+        const TableStart ts = TableStartOf(dev, root[b.param].table);
         if (!ts) continue;
         ResInfo ri;
         if (!g_heap_to_res.find({ ts.heap, ts.base + b.offset }, ri) || !ri.res) continue;
@@ -465,7 +465,7 @@ bool DrawComponent(InjectFrame& fr, int dm, const WwmiMod::Component* wc)
                 ID3D12PipelineState*                   pso = nullptr;
             } port_restore;
             {
-                const auto&                   tabs = CmdGfx(cmd_list).tables;
+                const auto&                   root = CmdGfx(cmd_list).root;
                 const uint64_t                layh = CmdGfxLayout(cmd_list);
                 std::vector<LayoutTableParam> ltabs;
                 if (layh) {
@@ -474,12 +474,12 @@ bool DrawComponent(InjectFrame& fr, int dm, const WwmiMod::Component* wc)
                     if (it != g_layout_tables.end()) ltabs = it->second;
                 }
                 for (const auto& t : ltabs) {
-                    const TableStart ts = TableStartOf(cmd_list->get_device(), tabs[t.param]);
+                    const TableStart ts = TableStartOf(cmd_list->get_device(), root[t.param].table);
                     if (!ts) continue;
                     auto* hp = ts.Heap();
                     if (t.kind == 1 && !port_restore.srv) port_restore.srv = hp;
                     if (t.kind == 0 && !port_restore.smp) port_restore.smp = hp;
-                    port_restore.tables.emplace_back((UINT)t.param, (uint64_t)tabs[t.param].handle);
+                    port_restore.tables.emplace_back((UINT)t.param, (uint64_t)root[t.param].table.handle);
                 }
                 if (ID3D12DescriptorHeap* gh = GameHeap(cmd_list, 0)) port_restore.srv = gh;
                 if (ID3D12DescriptorHeap* gh = GameHeap(cmd_list, 1)) port_restore.smp = gh;
@@ -573,10 +573,10 @@ bool DrawComponent(InjectFrame& fr, int dm, const WwmiMod::Component* wc)
                 {
                     auto const& gs = CmdGfx(cmd_list);
                     for (unsigned s = 0; s < 8; ++s) {
-                        gva[s] = gs.vb_va[s];
-                        gsz[s] = gs.vb_size[s];
-                        gstr[s] = gs.vb_stride[s];
-                        gres[s] = gs.vb_res[s];
+                        gva[s] = gs.vb[s].va;
+                        gsz[s] = gs.vb[s].size;
+                        gstr[s] = gs.vb[s].stride;
+                        gres[s] = gs.vb[s].res;
                     }
                 }
                 for (unsigned s = 0; s < 1; ++s) {
@@ -634,7 +634,7 @@ bool DrawComponent(InjectFrame& fr, int dm, const WwmiMod::Component* wc)
             ID3D12Resource* sk_inst = nullptr;
             {
                 auto const& gs = CmdGfx(cmd_list);
-                if (gs.vb_stride[6]) sk_inst = gs.vb_res[6];
+                if (gs.vb[6].stride) sk_inst = gs.vb[6].res;
             }
             bool           sk_first = false;
             const unsigned sk_copy = SkCopySlot(cmd_list, dm, wc->index, port_cb4_res, port_cb4_va, is_full_shadow_pass,
@@ -657,12 +657,12 @@ bool DrawComponent(InjectFrame& fr, int dm, const WwmiMod::Component* wc)
                 {
                     auto const& gs = CmdGfx(cmd_list);
                     for (unsigned q = 0; q < 8; ++q) {
-                        gva[q] = gs.vb_va[q];
-                        gstr[q] = gs.vb_stride[q];
-                        gres[q] = gs.vb_res[q];
+                        gva[q] = gs.vb[q].va;
+                        gstr[q] = gs.vb[q].stride;
+                        gres[q] = gs.vb[q].res;
                     }
-                    ifmt = gs.ib_index_bytes;
-                    ires = gs.ib_res;
+                    ifmt = gs.ib.index_bytes;
+                    ires = gs.ib.res;
                 }
                 SkNoteDrawVbs(dm, gres, 8);
                 auto xit_in = [&](ID3D12Resource* r, D3D12_RESOURCE_STATES to) -> bool {

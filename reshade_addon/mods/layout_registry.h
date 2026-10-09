@@ -86,7 +86,7 @@ struct CsUavTables {
 struct RegBind {
     uint8_t  param = 0xFF;     // root parameter index
     uint32_t offset = 0;       // descriptor offset WITHIN the table (0 for a root/push descriptor)
-    bool     is_table = false; // false = root descriptor (read from root_va / CmdCbv), true = table
+    bool     is_table = false; // false = root descriptor (read from root[].va / CmdCbv), true = table
 };
 struct LayoutRegMap {
     RegBind t_cs[RegisterFileWidth(TargetClass::ShaderResource)];

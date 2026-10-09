@@ -5,6 +5,7 @@
 #include <atomic>
 #include <unordered_map>
 #include <vector>
+#include <array>
 #include <cstdint>
 #include "../instrumentation/profiler.h" // ProfScope / PROF_CmdLock -- CmdLock below measures the acquire
 
@@ -21,29 +22,45 @@ struct CmdLock {
     std::unique_lock<std::mutex> lk = AcquireCmdLock();
 };
 
+struct ComputeBindNote {
+    uint64_t layout = 0; // the signature this binding belongs to
+    uint32_t frame = 0;
+    uint32_t seq = 0;
+};
+struct RootParam {
+    reshade::api::descriptor_table table = {};
+    reshade::api::descriptor_table ctable = {};
+    ComputeBindNote                ctable_note;
+    uint64_t                       va = 0;
+    ID3D12Resource*                res = nullptr; // owning resource of a root SRV/UAV (morph matcher: offset-proof identity)
+    uint8_t                        desc_type = 0;
+
+    // The table a DISPATCH sees: the compute-bound one, else the shared one.
+    reshade::api::descriptor_table compute_table() const { return ctable.handle ? ctable : table; }
+};
+struct VertexBind {
+    uint64_t        va = 0;
+    uint32_t        size = 0;
+    uint32_t        stride = 0; // for restoring the game's VBVs after our override
+    ID3D12Resource* res = nullptr;
+    uint64_t        res_width = 0; // the resource's own width, captured in on_bind_vertex_buffers
+};
+struct IndexBind {
+    uint64_t        va = 0;
+    uint32_t        size = 0;
+    uint32_t        index_bytes = 0; // game's IB (to restore)
+    ID3D12Resource* res = nullptr;   // IB resource (frame-dump capture needs the object, not just the VA)
+};
+
 struct CmdState {
-    reshade::api::descriptor_table tables[64];
-    reshade::api::descriptor_table ctables[64];
-    uint64_t                       ctab_layout[64] = {};
-    uint32_t                       ctab_frame[64] = {};
-    uint32_t                       ctab_seq[64] = {};
-    uint32_t                       ctab_seq_next = 0;
-    uint64_t                       root_va[64];
-    ID3D12Resource*                root_res[64] = {}; // owning resource of each root SRV/UAV (morph matcher: offset-proof identity)
-    uint8_t                        root_desc_type[64] = {};
-    uint64_t                       vb_va[16];
-    uint32_t                       vb_size[16];
-    uint32_t                       vb_stride[16] = {}; // for restoring the game's VBVs after our override
-    ID3D12Resource*                vb_res[16] = {};
-    uint64_t                       vb_res_width[16] = {}; // the resource's own width, captured in on_bind_vertex_buffers
-    uint64_t                       ib_va = 0;
-    uint32_t                       ib_size = 0;
-    uint32_t                       ib_index_bytes = 0; // game's IB (to restore)
-    ID3D12Resource*                ib_res = nullptr;   // IB resource (frame-dump capture needs the object, not just the VA)
-    uint64_t                       gfx_pso = 0;        // currently-bound graphics PSO (reshade pipeline handle == ID3D12PipelineState*)
-    uint64_t                       gfx_set = 0;        // what is actually set in its place (the decensor variant); 0 = gfx_pso itself
-    uint64_t                       gfx_restore() const { return gfx_set ? gfx_set : gfx_pso; }
-    uint64_t                       cmp_pso = 0;
+    RootParam  root[64];
+    uint32_t   ctable_seq_next = 0;
+    VertexBind vb[16];
+    IndexBind  ib;
+    uint64_t   gfx_pso = 0; // currently-bound graphics PSO (reshade pipeline handle == ID3D12PipelineState*)
+    uint64_t   gfx_set = 0; // what is actually set in its place (the decensor variant); 0 = gfx_pso itself
+    uint64_t   gfx_restore() const { return gfx_set ? gfx_set : gfx_pso; }
+    uint64_t   cmp_pso = 0;
 
     D3D12_VIEWPORT vp[16] = {};
     uint32_t       vp_count = 0;
@@ -82,12 +99,13 @@ struct UavNote {
     uint64_t res;
     uint32_t frame;
 };
-struct CmdHeaps {
-    ID3D12DescriptorHeap* heap[2] = {};
-    uint64_t              lo[2] = {};
-    uint64_t              hi[2] = {};
-    bool                  fresh[2] = {};
+struct HeapBind {
+    ID3D12DescriptorHeap* heap = nullptr;
+    uint64_t              lo = 0;
+    uint64_t              hi = 0;
+    bool                  fresh = false;
 };
+using CmdHeaps = std::array<HeapBind, 2>; // by heap type: CBV_SRV_UAV, sampler
 struct CmdBlock {
     CmdState             gfx;
     CmdCbvBinds          cbv;
@@ -165,11 +183,6 @@ inline CmdState&   CmdGfx(const void* cmd_list)
     if (b) return b->gfx;
     std::lock_guard l(g_cmd_mutex);
     return g_cmd_state[reinterpret_cast<uintptr_t>(cmd_list)]; // a null list
-}
-// The table a DISPATCH sees at root param `p`: the compute-bound one, else the shared array (see ctables).
-inline reshade::api::descriptor_table ComputeTable(const CmdState& s, uint32_t p)
-{
-    return s.ctables[p].handle ? s.ctables[p] : s.tables[p];
 }
 inline CmdCbvBinds& CmdCbv(const void* cmd_list)
 {

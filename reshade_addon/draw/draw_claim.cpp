@@ -66,12 +66,12 @@ static int PickSharedRangeSlot(command_list* cmd_list, uint32_t first_index, uin
     uint32_t                vstride = 0;
     {
         auto& st = CmdGfx(cmd_list);
-        ibr = st.ib_res;
-        ibva = st.ib_va;
-        if (st.ib_index_bytes) idxb = st.ib_index_bytes;
-        vbr = st.vb_res[0];
-        vbva = st.vb_va[0];
-        vstride = st.vb_stride[0];
+        ibr = st.ib.res;
+        ibva = st.ib.va;
+        if (st.ib.index_bytes) idxb = st.ib.index_bytes;
+        vbr = st.vb[0].res;
+        vbva = st.vb[0].va;
+        vstride = st.vb[0].stride;
     }
     if (vbva) {
         std::lock_guard l(g_char_mesh_mtx);
@@ -128,8 +128,8 @@ std::optional<bool> ClaimDraw(const DrawArgs& da, BoneRoots& roots, DrawClaim& d
             bool     vb6 = false;
             {
                 const auto& cg = CmdGfx(cmd_list);
-                bvb0 = cg.vb_va[0];
-                vb6 = cg.vb_res[6] != nullptr;
+                bvb0 = cg.vb[0].va;
+                vb6 = cg.vb[6].res != nullptr;
             }
             const bool skinned = InSkinBand(bvb0) || vb6; // a character mesh: in the skin-cache band, or reading the character's stream 6
             if (g_debug && skip_any && !skinned && DiagOnce("SKIPONLY-BAND", (int)(first_index * 31u + index_count)))
@@ -145,12 +145,12 @@ std::optional<bool> ClaimDraw(const DrawArgs& da, BoneRoots& roots, DrawClaim& d
                 uint32_t        vstride = 0;
                 {
                     auto& st = CmdGfx(cmd_list);
-                    ibr = st.ib_res;
-                    ibva = st.ib_va;
-                    if (st.ib_index_bytes) idxb = st.ib_index_bytes;
-                    vbr = st.vb_res[0];
-                    vbva = st.vb_va[0];
-                    vstride = st.vb_stride[0];
+                    ibr = st.ib.res;
+                    ibva = st.ib.va;
+                    if (st.ib.index_bytes) idxb = st.ib.index_bytes;
+                    vbr = st.vb[0].res;
+                    vbva = st.vb[0].va;
+                    vstride = st.vb[0].stride;
                 }
                 if (ibr && vbr && vstride) {
                     uint32_t iboff = (uint32_t)(ibva - ibr->GetGPUVirtualAddress());
@@ -242,12 +242,12 @@ std::optional<bool> ClaimDraw(const DrawArgs& da, BoneRoots& roots, DrawClaim& d
             uint64_t    all_vb_res_w[8] = {}; // the RESOURCE's own width -- see VBSLOTS
             {
                 auto& st = CmdGfx(cmd_list);
-                vb0 = st.vb_va[0];
+                vb0 = st.vb[0].va;
                 for (unsigned q = 0; q < 8; ++q) {
-                    all_vb_va[q] = st.vb_va[q];
-                    all_vb_sz[q] = st.vb_size[q];
-                    all_vb_str[q] = st.vb_stride[q];
-                    all_vb_res_w[q] = st.vb_res_width[q];
+                    all_vb_va[q] = st.vb[q].va;
+                    all_vb_sz[q] = st.vb[q].size;
+                    all_vb_str[q] = st.vb[q].stride;
+                    all_vb_res_w[q] = st.vb[q].res_width;
                 }
                 const BoneRoots& br = roots.Get();
                 b4_root = br.b4;
@@ -323,12 +323,12 @@ std::optional<bool> ClaimDraw(const DrawArgs& da, BoneRoots& roots, DrawClaim& d
                     uint32_t        vstride = 0;
                     {
                         auto& st = CmdGfx(cmd_list);
-                        ibr = st.ib_res;
-                        ibva = st.ib_va;
-                        if (st.ib_index_bytes) idxb = st.ib_index_bytes;
-                        vbr = st.vb_res[0];
-                        vbva = st.vb_va[0];
-                        vstride = st.vb_stride[0];
+                        ibr = st.ib.res;
+                        ibva = st.ib.va;
+                        if (st.ib.index_bytes) idxb = st.ib.index_bytes;
+                        vbr = st.vb[0].res;
+                        vbva = st.vb[0].va;
+                        vstride = st.vb[0].stride;
                     }
                     if (ibr && vbr && max_end && vstride) {
                         uint32_t iboff = (uint32_t)(ibva - ibr->GetGPUVirtualAddress());
@@ -347,8 +347,8 @@ std::optional<bool> ClaimDraw(const DrawArgs& da, BoneRoots& roots, DrawClaim& d
                 uint64_t claim_ib_bytes = 0;
                 {
                     const auto& gs = CmdGfx(cmd_list);
-                    claim_ib_va = gs.ib_va;
-                    claim_ib_bytes = gs.ib_size;
+                    claim_ib_va = gs.ib.va;
+                    claim_ib_bytes = gs.ib.size;
                 }
                 char_ibset = IbAnchorNoteAndAsk(claim_ib_va, claim_ib_bytes, md, ci);
                 if (char_ibset && !is_mod_char && !char_vb)
@@ -441,7 +441,7 @@ void LodPinNote(const DrawArgs& da, BoneRoots& roots, DrawClaim& dc)
     const uint64_t                    vs_hash = da.vs_hash;
     MergedComp*&                      mc = dc.mc;
     if (g_lod_pin && !mc && index_count >= 256) {
-        const uint64_t        vb0 = CmdGfx(cmd_list).vb_va[0];
+        const uint64_t        vb0 = CmdGfx(cmd_list).vb[0].va;
         ID3D12Resource* const b4res = roots.Get().b4cb.res;
         const uint64_t        b4va = roots.Get().b4cb.va;
         uint32_t              sh = HashBoneCB(b4res, b4va);

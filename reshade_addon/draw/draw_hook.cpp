@@ -41,7 +41,7 @@ bool on_draw_indexed_body(command_list* cmd_list, uint32_t index_count, uint32_t
     if (index_count >= 256 && logger::enabled(3)) { // feeds only the SEEDHB trace line
         uint64_t hbvb0 = 0;
         {
-            hbvb0 = CmdGfx(cmd_list).vb_va[0];
+            hbvb0 = CmdGfx(cmd_list).vb[0].va;
         }
         if (hbvb0) {
             std::lock_guard l(g_hb_mtx);
@@ -91,7 +91,7 @@ bool on_draw_indexed_body(command_list* cmd_list, uint32_t index_count, uint32_t
     if (g_hide_unclaimed_char && !mc && index_count >= 2000) {
         uint64_t vb0 = 0;
         {
-            vb0 = CmdGfx(cmd_list).vb_va[0];
+            vb0 = CmdGfx(cmd_list).vb[0].va;
         }
         if (InSkinBand(vb0)) return true;
     }

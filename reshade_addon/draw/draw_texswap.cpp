@@ -130,14 +130,14 @@ void StampClaimedTextures(const DrawArgs& da, DrawClaim& dc)
         ProfScope   _th_prep(PROF_TH_Prep);
         auto*       dev = reinterpret_cast<ID3D12Device*>(cmd_list->get_device()->get_native());
         uint32_t    inc = dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-        const auto& tabs = CmdGfx(cmd_list).tables;
+        const auto& root = CmdGfx(cmd_list).root;
         if (g_debug) {
             uint64_t lkey = vs_hash ^ ((uint64_t)index_count << 1) ^ ((uint64_t)mc->comp_idx << 40);
             if (DiagOnce("DRAW-LKEY", (int)(lkey ^ (lkey >> 32)))) {
                 uint64_t psh = 0;
                 cmd_list->get_private_data(s_iid_ps_hash, &psh);
                 for (int p = 0; p < 64; ++p) {
-                    const TableStart ts = TableStartOf(cmd_list->get_device(), tabs[p]);
+                    const TableStart ts = TableStartOf(cmd_list->get_device(), root[p].table);
                     if (!ts) continue;
                     D3D12_DESCRIPTOR_HEAP_DESC hd = ts.Heap()->GetDesc();
                     logger::trace("TBLLAYOUT comp=%d vs=%016llx ps=%016llx count=%u first=%u | p=%d heap=%llx type=%d num=%u base=%u",
@@ -160,10 +160,10 @@ void StampClaimedTextures(const DrawArgs& da, DrawClaim& dc)
         int      texflip_ord = -1;
         uint64_t texflip_ps = 0; // TEXFLIP: this draw's identity, resolved on its first slot
         for (int p = 0; p < 64; ++p) {
-            if (tabs[p].handle == 0) continue;
+            if (root[p].table.handle == 0) continue;
             if (rs.known[p] && !rs.len[p]) continue;
             ProfScope        _th_walk(PROF_TH_Walk);
-            const TableStart ts = TableStartOf(cmd_list->get_device(), tabs[p]);
+            const TableStart ts = TableStartOf(cmd_list->get_device(), root[p].table);
             if (!ts) continue;
             auto*           heap = ts.Heap();
             const uint32_t  base = ts.base;
@@ -326,13 +326,13 @@ void StampClaimedTextures(const DrawArgs& da, DrawClaim& dc)
 unsigned UnstampClaimedTextures(const DrawArgs& da)
 {
     reshade::api::command_list* const cmd_list = da.cmd_list;
-    const auto&                       tabs = CmdGfx(cmd_list).tables;
+    const auto&                       root = CmdGfx(cmd_list).root;
     uint32_t                          scan_len[64];
     LayoutTexScanLens(CmdGfxLayout(cmd_list), scan_len);
     unsigned restored = 0;
     for (int p = 0; p < 64; ++p) {
-        if (tabs[p].handle == 0) continue;
-        const TableStart ts = TableStartOf(cmd_list->get_device(), tabs[p]);
+        if (root[p].table.handle == 0) continue;
+        const TableStart ts = TableStartOf(cmd_list->get_device(), root[p].table);
         if (!ts) continue;
         const uint32_t num = ts.Heap()->GetDesc().NumDescriptors;
         for (uint32_t s = 0; s < scan_len[p] && ts.base + s < num; ++s) {

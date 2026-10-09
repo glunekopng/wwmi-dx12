@@ -213,9 +213,9 @@ void SectionDrawIndexed(SectionDraw& sd, uint32_t c, uint32_t s2, uint32_t b2)
             {
                 auto& gs = CmdGfx(cmd_list);
                 for (unsigned s = 0; s < 8; ++s) {
-                    gva[s] = gs.vb_va[s];
-                    gstr[s] = gs.vb_stride[s];
-                    gsz[s] = gs.vb_size[s];
+                    gva[s] = gs.vb[s].va;
+                    gstr[s] = gs.vb[s].stride;
+                    gsz[s] = gs.vb[s].size;
                 }
             }
             char vbs[1024];
@@ -256,10 +256,10 @@ void SectionDrawIndexed(SectionDraw& sd, uint32_t c, uint32_t s2, uint32_t b2)
                 if (vpn) vp0 = gs.vp[0];
                 if (scn) sc0 = gs.scissor[0];
                 for (int p = 0; p < 16 && ro < (int)sizeof(roots) - 24; ++p)
-                    if (gs.root_va[p])
+                    if (gs.root[p].va)
                         ro += _snprintf_s(roots + ro, sizeof(roots) - ro, _TRUNCATE,
                             " r%d=%llx", p,
-                            (unsigned long long)gs.root_va[p]);
+                            (unsigned long long)gs.root[p].va);
             }
             logger::write("VBDIAG2 mod=%d comp=%d is_shadow=%d vp=%u[%.0f,%.0f %.0fx%.0f "
                           "z=%.3f..%.3f] sc=%u[%ld,%ld %ldx%ld] topo=%u sref=%u pso=%llx |%s",

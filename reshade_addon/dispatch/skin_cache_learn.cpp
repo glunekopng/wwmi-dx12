@@ -40,11 +40,11 @@ void LearnSkinCache(const DispatchArgs& da, const CmdState& state)
             static thread_local Cand cand[kCandCap]; // 17 KB: per thread, not on the stack (C6262)
             uint32_t                 nc = 0;
             for (uint32_t p = 0; p < kRootCount; ++p)
-                if (state.root_va[p]) cand[nc++] = { state.root_va[p], 0u, true };
+                if (state.root[p].va) cand[nc++] = { state.root[p].va, 0u, true };
             {
                 auto* dev = cmd_list->get_device();
                 for (uint32_t p = 0; p < kTableCount; ++p) {
-                    const auto       tbl = ComputeTable(state, p);
+                    const auto       tbl = state.root[p].compute_table();
                     const TableStart ts = TableStartOf(dev, tbl);
                     if (!ts) continue;
                     for (uint32_t i = 0; i < kSlotCount; ++i) {
