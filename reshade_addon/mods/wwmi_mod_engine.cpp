@@ -1,0 +1,290 @@
+// ===========================================================================
+//  wwmi_mod_engine.cpp -- the mod's layout, READ FROM THE PORTED ENGINE.
+//
+//  This file is the WHOLE reader: no second parser re-reads the .ini files their IniHandler has
+//  already read.
+//
+//  Every value below is READ, never derived:
+//     index / hash / match_first_index / match_index_count   [TextureOverrideComponentN] keys
+//     vg_offset / vg_count                                   $\WWMIv1\vg_offset, $\WWMIv1\vg_count
+//     drawindexed sub-draws                                  the section's lines, IN FILE ORDER,
+//                                                            including those reached by `run =`
+//     remapped / remap_id / remap_vg                         [CommandListRemapMergedSkeleton]
+//     resources + their filenames                            their [Resource*] store, ABSOLUTE paths
+//     object_guid / mesh_vertex_count                        [Constants] globals, via their var store
+//     the mod folder                                         their ini_path bookkeeping, not the ns
+//
+//  NAME SHAPES ARE NOT GUESSED. They were dumped from the live parse with `parse_test.exe -dumpns`
+//  (writes port_sections.txt):
+//     TextureOverride\SomeMod\Component0              <- author case, ResolveSection finds it
+//     resource\somemod\blendbuffer  <abs filename>    <- lowercased
+//     customshader\mods\somemod\mod.ini\transparency_1
+//  ResolveSection indexes TextureOverride* and CommandList* only, so a [CustomShader*] is reached by
+//  CONSTRUCTING `CustomShader\<ns>\<tail>`. That is proven, not assumed: the same harness reports
+//  "customshader run-sites: 3 referenced, 3 reachable by constructed name, 3 drawindexed inside them".
+// ===========================================================================
+#include "wwmi_mod.h"
+#include "../migoto/port_api.h"
+#include "../../src/log.h"
+
+#include <algorithm>
+#include <cstdio> // swscanf_s -- drawindexed parsing
+#include <cwctype>
+#include <cstdlib>
+#include <cstring>
+#include <set>
+#include <string>
+#include <vector>
+
+namespace WwmiMod {
+
+namespace {
+
+std::wstring Lower(std::wstring s)
+{
+    for (auto& c : s) c = (wchar_t)towlower(c);
+    return s;
+}
+
+bool ParseDrawIndexed(const std::wstring& val, SubDraw& out)
+{
+    if (Lower(val).rfind(L"auto", 0) == 0) return false; // handled by the draw hook, not a fixed range
+    unsigned c = 0;
+    unsigned s = 0;
+    if (swscanf_s(val.c_str(), L" %u , %u", &c, &s) < 2) return false;
+    out.count = c;
+    out.start = s;
+    return c != 0;
+}
+
+std::wstring NsOfFq(const std::wstring& fq)
+{
+    const size_t first = fq.find(L'\\');
+    const size_t last = fq.find_last_of(L'\\');
+    if (first == std::wstring::npos || last == std::wstring::npos || first >= last) return std::wstring();
+    return fq.substr(first + 1, last - first - 1);
+}
+
+struct KeyCtx {
+    Component*            comp;
+    std::vector<SubDraw>* draws;
+    std::wstring          ns;           // author-case namespace, for constructing CustomShader names
+    std::wstring          pending_cond; // `if <expr>` currently open; recorded for the log only
+    int                   depth;        // run-expansion depth guard
+};
+
+void OnKey(const wchar_t* key, const wchar_t* val, void* user);
+
+void ExpandRun(KeyCtx* k, const std::wstring& target)
+{
+    if (k->depth >= 4) return; // pathological self-reference guard
+    if (_wcsnicmp(target.c_str(), L"CustomShader", 12) != 0) return;
+    const std::wstring tail = target.substr(12);
+    if (tail.empty() || tail[0] == L'\\') return; // namespaced framework shader, not a part
+
+    const std::wstring fq = L"CustomShader\\" + k->ns + L"\\" + tail;
+    KeyCtx             sub{ k->comp, k->draws, k->ns, k->pending_cond, k->depth + 1 };
+    PortApi::ForEachSectionKey(fq.c_str(), &OnKey, &sub);
+}
+
+void OnKey(const wchar_t* key, const wchar_t* val, void* user)
+{
+    KeyCtx*            k = (KeyCtx*)user;
+    const std::wstring lk = Lower(key ? key : L"");
+    const std::wstring v = val ? val : L"";
+
+    if (lk == L"hash") {
+        k->comp->ib_hash = (uint32_t)wcstoul(v.c_str(), nullptr, 16);
+        return;
+    }
+    if (lk == L"match_first_index") {
+        k->comp->match_first_index = (uint32_t)wcstoul(v.c_str(), nullptr, 10);
+        return;
+    }
+    if (lk == L"match_index_count") {
+        k->comp->match_index_count = (uint32_t)wcstoul(v.c_str(), nullptr, 10);
+        return;
+    }
+
+    // WWMI passes the merge window as namespaced variables rather than section keys.
+    if (lk.find(L"vg_offset") != std::wstring::npos) {
+        k->comp->vg_offset = (uint32_t)wcstoul(v.c_str(), nullptr, 10);
+        return;
+    }
+    if (lk.find(L"vg_count") != std::wstring::npos) {
+        k->comp->vg_count = (uint32_t)wcstoul(v.c_str(), nullptr, 10);
+        return;
+    }
+
+    if (lk == L"if") {
+        k->pending_cond = v;
+        return;
+    }
+    if (lk == L"endif") {
+        k->pending_cond.clear();
+        return;
+    }
+
+    if (lk == L"run") {
+        ExpandRun(k, v);
+        return;
+    }
+
+    if (lk == L"drawindexed") {
+        SubDraw d{};
+        if (ParseDrawIndexed(v, d)) {
+            d.cond = k->pending_cond;
+            k->draws->push_back(d);
+        }
+        return;
+    }
+}
+
+struct RemapInfo {
+    int      comp_idx;
+    int      id;
+    uint32_t vg;
+};
+
+struct RemapCtx {
+    std::vector<RemapInfo>* out;
+    int                     rm_id = -1;
+    uint32_t                rm_vg = 0;
+};
+
+void OnRemapKey(const wchar_t* key, const wchar_t* val, void* user)
+{
+    RemapCtx*                 r = (RemapCtx*)user;
+    const std::wstring        lk = Lower(key ? key : L"");
+    const std::wstring        v = val ? val : L"";
+    static const std::wstring kPrimary = L"resourceremappedskeletoncomponent";
+
+    if (lk == L"$\\wwmiv1\\blend_remap_id") {
+        r->rm_id = _wtoi(v.c_str());
+        return;
+    }
+    if (lk == L"$\\wwmiv1\\vg_count") {
+        r->rm_vg = (uint32_t)wcstoul(v.c_str(), nullptr, 10);
+        return;
+    }
+
+    if (lk.rfind(kPrimary, 0) == 0) {
+        // "ResourceRemappedSkeletonComponentN = copy ResourceRemappedSkeletonRW" -- PRIMARY remap output
+        if (Lower(v).rfind(L"copy", 0) == 0)
+            r->out->push_back({ _wtoi(lk.c_str() + kPrimary.size()), r->rm_id, r->rm_vg });
+        return;
+    }
+}
+
+struct ResCtx {
+    const std::wstring*    ns_lower;
+    std::vector<Resource>* out;
+};
+
+void OnResource(const wchar_t* fq_name, const wchar_t* filename, int /*type*/, bool /*substantiated*/,
+    ID3D12Resource* /*dx12*/, void*                    user)
+{
+    ResCtx* c = (ResCtx*)user;
+    if (!fq_name) return;
+    const std::wstring fq = fq_name;
+    if (Lower(NsOfFq(fq)) != *c->ns_lower) return;
+
+    const size_t last = fq.find_last_of(L'\\');
+    if (last == std::wstring::npos) return;
+
+    Resource r;
+    r.name = L"Resource" + fq.substr(last + 1);
+    r.fq = fq; // their key -- how the buffer is asked for later
+    r.filename = filename ? filename : L"";
+    c->out->push_back(std::move(r));
+}
+
+} // namespace
+
+// Read one component section into `out`. `fq_section` is their registered name.
+static bool ReadComponent(const std::wstring& fq_section, int index, Component& out)
+{
+    out = Component{};
+    out.index = index;
+    KeyCtx ctx{ &out, &out.draws, NsOfFq(fq_section), std::wstring(), 0 };
+    PortApi::ForEachSectionKey(fq_section.c_str(), &OnKey, &ctx);
+    return true;
+}
+
+// The whole mod layout for a namespace, straight from the engine. Returns the number of components read.
+int ReadComponentsFromEngine(const std::wstring& ns, Mod& out)
+{
+    out = Mod{};
+
+    std::wstring ns_fq; // the namespace exactly as their parser spells it, taken from a real section
+    {
+        wchar_t probe[512] = {};
+        if (PortApi::ResolveSection(ns.c_str(), nullptr, L"Component0", probe, std::size(probe)) && probe[0]) {
+            ns_fq = NsOfFq(probe);
+            wchar_t folder[512] = {};
+            if (PortApi::SectionFolder(probe, folder, std::size(folder))) out.dir = folder;
+        }
+    }
+    if (ns_fq.empty()) ns_fq = ns;
+
+    // Components are numbered from 0 and dense in every shipped WWMI mod: the first gap ends the scan.
+    for (int i = 0;; ++i) {
+        wchar_t            fq[512] = {};
+        const std::wstring sec = L"Component" + std::to_wstring(i);
+        if (!PortApi::ResolveSection(ns.c_str(), nullptr, sec.c_str(), fq, std::size(fq)) || !fq[0]) break;
+        Component c;
+        ReadComponent(fq, i, c);
+        out.comps.push_back(std::move(c));
+    }
+
+    out.comps.erase(std::remove_if(out.comps.begin(), out.comps.end(),
+                        [](const Component& c) { return c.match_index_count == 0 && c.draws.empty(); }),
+        out.comps.end());
+
+    {
+        std::vector<RemapInfo> remaps;
+        wchar_t                fq[512] = {};
+        if (PortApi::ResolveSection(ns.c_str(), nullptr, L"RemapMergedSkeleton", fq, std::size(fq)) && fq[0]) {
+            RemapCtx rc;
+            rc.out = &remaps;
+            PortApi::ForEachSectionKey(fq, &OnRemapKey, &rc);
+        }
+        for (const auto& ri : remaps)
+            for (auto& c : out.comps)
+                if (c.index == ri.comp_idx) {
+                    c.remapped = true;
+                    c.remap_id = ri.id;
+                    c.remap_vg = ri.vg;
+                }
+    }
+
+    // Resources, from their [Resource*] store, filtered to this namespace.
+    {
+        const std::wstring ns_lower = Lower(ns_fq);
+        ResCtx             rc{ &ns_lower, &out.resources };
+        PortApi::ForEachCustomResource(&OnResource, &rc);
+        std::set<std::wstring> seen;
+        std::vector<Resource>  uniq;
+        uniq.reserve(out.resources.size());
+        for (auto& r : out.resources)
+            if (seen.insert(Lower(r.name)).second) uniq.push_back(std::move(r));
+        out.resources.swap(uniq);
+        for (const auto& r : out.resources)
+            if (Lower(r.name) == L"resourceblendremapforwardbuffer") {
+                out.forward_map_file = r.filename;
+                break;
+            }
+    }
+
+    // [Constants] globals, from their variable store rather than a re-read of the file.
+    out.object_guid = (int)PortApi::GetVarNs(ns.c_str(), L"object_guid", 0.f);
+    out.mesh_vertex_count = (uint32_t)PortApi::GetVarNs(ns.c_str(), L"mesh_vertex_count", 0.f);
+
+    logger::write("WwmiMod: ns='%ls' -> %zu comp(s), %zu resource(s), guid=%d verts=%u dir='%ls'%s",
+        ns.c_str(), out.comps.size(), out.resources.size(), out.object_guid,
+        out.mesh_vertex_count, out.dir.c_str(),
+        out.forward_map_file.empty() ? "" : " (has fwdmap)");
+    return (int)out.comps.size();
+}
+
+} // namespace WwmiMod

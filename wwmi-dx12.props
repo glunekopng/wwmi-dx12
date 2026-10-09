@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup Label="WwmiPaths">
+    <WwmiRoot Condition="'$(WwmiRoot)' == ''">$(MSBuildThisFileDirectory)</WwmiRoot>
+
+    <WwmiRefDir Condition="'$(WwmiRefDir)' == ''">$(WwmiRoot)third_party\3Dmigoto</WwmiRefDir>
+    <WwmiPristineDir Condition="'$(WwmiPristineDir)' == ''">$(WwmiRoot)build_addon\3dm_src</WwmiPristineDir>
+
+    <WwmiDeploy Condition="'$(WwmiDeploy)' == '' and !Exists('$(WwmiRoot)deploy.ps1')">false</WwmiDeploy>
+    <WwmiDeploy Condition="'$(WwmiDeploy)' == ''">true</WwmiDeploy>
+    <WwmiDeployTimeoutSec Condition="'$(WwmiDeployTimeoutSec)' == ''">120</WwmiDeployTimeoutSec>
+
+    <WwmiRT Condition="'$(WwmiRT)' == ''">$(WWMI_RT)</WwmiRT>
+    <WwmiRT Condition="'$(WwmiRT)' == '' and !Exists('$(WwmiRoot)reshade_addon\rt\rt_draw.cpp')">0</WwmiRT>
+    <WwmiRT Condition="'$(WwmiRT)' == ''">1</WwmiRT>
+  </PropertyGroup>
+
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <AdditionalOptions>"/d1trimfile:$(WwmiRoot)\" %(AdditionalOptions)</AdditionalOptions>
+      <RemoveUnreferencedCodeData>false</RemoveUnreferencedCodeData>
+      <WarningLevel>Level4</WarningLevel>
+      <ExternalWarningLevel>TurnOffAllWarnings</ExternalWarningLevel>
+      <DisableSpecificWarnings>4324;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+    </ClCompile>
+  </ItemDefinitionGroup>
+
+  <PropertyGroup>
+    <WwmiExternalDirs>$(WwmiPristineDir);$(WwmiRefDir);$(WwmiRoot)reshade_addon\sdk\include;$(WwmiRoot)reshade_addon\sdk\deps\imgui;$(WwmiRoot)third_party</WwmiExternalDirs>
+    <ExternalIncludePath>$(WwmiExternalDirs);$(ExternalIncludePath)</ExternalIncludePath>
+  </PropertyGroup>
+
+  <Target Name="WwmiTrackExternalHeaders" AfterTargets="AddExternalIncludDirectoriesToPaths">
+    <ItemGroup>
+      <_WwmiExcludePath Include="$(ExcludePath)" />
+      <_WwmiExcludePath Remove="$(WwmiExternalDirs)" />
+    </ItemGroup>
+    <PropertyGroup>
+      <ExcludePath>@(_WwmiExcludePath)</ExcludePath>
+    </PropertyGroup>
+  </Target>
+
+  <PropertyGroup>
+    <GenerateManifest>false</GenerateManifest>
+  </PropertyGroup>
+
+  <ItemDefinitionGroup Condition="'$(Configuration)' == 'Release'">
+    <ClCompile>
+      <PreprocessorDefinitions>NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+  </ItemDefinitionGroup>
+
+  <PropertyGroup Label="WwmiOutput">
+    <OutDir>$(WwmiRoot)build_addon\</OutDir>
+  </PropertyGroup>
+</Project>

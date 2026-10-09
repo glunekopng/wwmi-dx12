@@ -1,0 +1,866 @@
+// draw_comp.cpp -- one mod component drawn in place of a game draw: its [TextureOverride] section run
+// by their engine, with this draw's hooks (RabbitFX latches, the section's drawindexed, the restore
+// callback). See draw_inject.h.
+#include "../addon_common.h"
+#include "draw_hook.h"
+#include "../mods/claim_state.h"
+#include "../instrumentation/gpu_timer.h"
+#include "../mods/skeleton.h"
+#include "../mods/port_section.h"
+#include "../hooks/resource_tracker.h"
+#include "../hooks/cmd_bind_hooks.h"
+#include "../mods/layout_registry.h"
+#include "../hooks/pipeline_hooks.h"
+#include "../rt/rt_hooks.h"
+#include "draw_ctx.h"
+#include "draw_inject.h"
+#include "../mods/wwmi_mod.h"
+#include "../migoto/dx12_bridge.h"
+
+struct CompBoneCb {
+    uint64_t va = 0;
+    uint32_t frame = 0;
+};
+static std::mutex                               g_comp_bone_mtx;
+static std::unordered_map<uint32_t, CompBoneCb> g_comp_bone; // key = (mod << 8) | comp
+
+constexpr unsigned kSkMatchBones = 32;
+struct SkBones {
+    unsigned n = 0;
+    float    t[kSkMatchBones * 3] = {};
+};
+struct SkCopySeen {
+    uint64_t                     key = 0;
+    unsigned                     slot = 0;
+    std::vector<uint64_t>        cb4_va;
+    std::vector<ID3D12Resource*> cb4_res;
+    std::vector<uint64_t>        keys;
+    std::vector<uint64_t>        cb4_drawn;
+};
+struct SkCopyMod {
+    uint32_t                          frame = 0;
+    bool                              noted = false;
+    bool                              off = false;
+    unsigned                          oversplit = 0;
+    std::vector<SkCopySeen>           cur;
+    std::vector<unsigned>             prev_slots;
+    std::vector<std::vector<SkBones>> prev_bones;
+};
+constexpr unsigned            kSkOversplitFrames = 3;
+static std::mutex             g_skcopy_mtx;
+static std::vector<SkCopyMod> g_skcopy;
+static unsigned               g_skcopy_gen = ~0u;
+
+static SkBones SkBonesOf(ID3D12Resource* res, uint64_t va)
+{
+    float          m[kSkMatchBones * 12] = {};
+    const uint32_t got = SnapshotGameCB(res, va, reinterpret_cast<uint8_t*>(m), sizeof m, true);
+    SkBones        b;
+    b.n = got / 48;
+    for (unsigned i = 0; i < b.n; ++i) {
+        b.t[i * 3] = m[i * 12 + 3];
+        b.t[i * 3 + 1] = m[i * 12 + 7];
+        b.t[i * 3 + 2] = m[i * 12 + 11];
+    }
+    return b;
+}
+
+static double SkBonesRms(const SkBones& a, const SkBones& b)
+{
+    const unsigned n = a.n < b.n ? a.n : b.n;
+    if (!n) return -1.0;
+    double d = 0;
+    for (unsigned k = 0; k < n * 3; ++k) d += (double)(a.t[k] - b.t[k]) * (a.t[k] - b.t[k]);
+    return std::sqrt(d / n);
+}
+
+static uint64_t ObjectCbOf(reshade::api::command_list* cl)
+{
+    int root = -1;
+    {
+        std::lock_guard l(g_layout_mutex);
+        auto            it = g_layout_b2_root.find(CmdGfxLayout(cl));
+        if (it != g_layout_b2_root.end()) root = it->second;
+    }
+    return (root >= 0 && root < 64) ? CmdCbv(cl).binds[root].va : 0;
+}
+
+static void SkCopyRoll(SkCopyMod& m, int dm)
+{
+    m.prev_slots.clear();
+    m.prev_bones.clear();
+    size_t comps = 0;
+    size_t active = 0;
+    for (const SkCopySeen& e : m.cur) {
+        m.prev_slots.push_back(e.slot);
+        comps = e.cb4_va.size() > comps ? e.cb4_va.size() : comps;
+        for (uint64_t va : e.cb4_va)
+            if (va) {
+                ++active;
+                break;
+            }
+    }
+    size_t most = 0;
+    for (size_t c = 0; c < comps; ++c) {
+        size_t n = 0;
+        for (const SkCopySeen& e : m.cur)
+            if (c < e.cb4_va.size() && e.cb4_va[c]) ++n;
+        most = n > most ? n : most;
+    }
+    m.oversplit = (most && active > most) ? m.oversplit + 1 : 0;
+    if (m.oversplit >= kSkOversplitFrames) {
+        m.off = true;
+        logger::write("SKCOPIES mod=%d f=%u: for %u frames, %zu vs-cb2 addresses drew components no two of them share -- "
+                      "vs-cb2 does not tell this character's copies apart; they share one skeleton until the next load",
+            dm, m.frame, m.oversplit, active);
+    }
+    if (m.cur.size() >= 2) {
+        unsigned top = 0;
+        for (const SkCopySeen& e : m.cur) top = e.slot > top ? e.slot : top;
+        m.prev_bones.assign(top + 1, std::vector<SkBones>());
+        for (const SkCopySeen& e : m.cur) {
+            std::vector<SkBones>& pb = m.prev_bones[e.slot];
+            pb.resize(e.cb4_va.size());
+            for (size_t c = 0; c < e.cb4_va.size(); ++c)
+                if (e.cb4_va[c]) pb[c] = SkBonesOf(e.cb4_res[c], e.cb4_va[c]);
+        }
+    }
+    m.cur.clear();
+}
+
+static unsigned SkCopySlot(reshade::api::command_list* cl, int dm, int comp, ID3D12Resource* cb4_res, uint64_t cb4_va,
+    bool shadow, bool* first_sight)
+{
+    *first_sight = false;
+    if (!g_skel_copies || dm < 0 || comp < 0) return 0;
+    const uint64_t key = ObjectCbOf(cl);
+    if (!key) return 0;
+    std::lock_guard l(g_skcopy_mtx);
+    const unsigned  gen = PortApi::LoadGeneration();
+    if (g_skcopy_gen != gen) {
+        g_skcopy_gen = gen;
+        g_skcopy.clear();
+    }
+    if (g_skcopy.size() <= (size_t)dm) g_skcopy.resize((size_t)dm + 1);
+    SkCopyMod& m = g_skcopy[dm];
+    if (!m.noted) {
+        m.noted = true;
+        *first_sight = true;
+    }
+    if (m.off) return 0;
+    if (m.frame != g_frame_id) {
+        SkCopyRoll(m, dm);
+        m.frame = g_frame_id;
+        if (m.off) return 0;
+    }
+    size_t at = m.cur.size();
+    for (size_t i = 0; i < m.cur.size(); ++i)
+        if (m.cur[i].key == key || std::find(m.cur[i].keys.begin(), m.cur[i].keys.end(), key) != m.cur[i].keys.end()) at = i;
+    if (at == m.cur.size() && cb4_va)
+        for (size_t i = 0; i < m.cur.size(); ++i) {
+            SkCopySeen& o = m.cur[i];
+            if (std::find(o.cb4_drawn.begin(), o.cb4_drawn.end(), cb4_va) == o.cb4_drawn.end()) continue;
+            at = i;
+            o.keys.push_back(key);
+            if (DiagOnce("SKCOPIES-JOINED", dm))
+                logger::write("SKCOPIES mod=%d comp=%d f=%u: vs-cb2 %llx is drawn with bone CB %llx, already drawn this frame "
+                              "under vs-cb2 %llx -- the same copy, on its skeleton #%u",
+                    dm, comp, g_frame_id, (unsigned long long)key, (unsigned long long)cb4_va, (unsigned long long)o.key,
+                    o.slot);
+            if (ProbeArmed())
+                logger::report("SKCOPY f=%u mod=%d comp=%d vs-cb2=%llx cb4=%llx%s -> skeleton #%u (its bone CB was drawn under "
+                               "vs-cb2 %llx)",
+                    g_frame_id, dm, comp, (unsigned long long)key, (unsigned long long)cb4_va, shadow ? " shadow" : "", o.slot,
+                    (unsigned long long)o.key);
+            break;
+        }
+    if (at == m.cur.size()) {
+        std::vector<char> taken;
+        for (const SkCopySeen& e : m.cur) {
+            if (taken.size() <= e.slot) taken.resize(e.slot + 1, 0);
+            taken[e.slot] = 1;
+        }
+        auto        free_slot = [&](unsigned k) { return k >= taken.size() || !taken[k]; };
+        unsigned    slot = ~0u;
+        double      best = -1;
+        const char* why = "a new copy";
+        if (!m.prev_bones.empty() && cb4_res && cb4_va) {
+            const SkBones mine = SkBonesOf(cb4_res, cb4_va);
+            for (unsigned k : m.prev_slots) {
+                if (!free_slot(k) || k >= m.prev_bones.size()) continue;
+                for (const SkBones& pb : m.prev_bones[k]) {
+                    const double d = SkBonesRms(mine, pb);
+                    if (d >= 0 && (best < 0 || d < best)) {
+                        best = d;
+                        slot = k;
+                    }
+                }
+            }
+            if (slot != ~0u) why = "nearest bones of last frame";
+        }
+        if (slot == ~0u)
+            for (unsigned k : m.prev_slots)
+                if (free_slot(k)) {
+                    slot = k;
+                    why = "the copy of last frame";
+                    break;
+                }
+        if (slot == ~0u) {
+            slot = 0;
+            while (!free_slot(slot)) ++slot;
+        }
+        m.cur.push_back(SkCopySeen{ key, slot });
+        if (slot && DiagOnce("SKCOPIES-SECOND", dm))
+            logger::write("SKCOPIES mod=%d comp=%d f=%u: another copy of this character (vs-cb2 %llx) -- it merges and draws "
+                          "with its own skeleton #%u",
+                dm, comp, g_frame_id, (unsigned long long)key, slot);
+        if (ProbeArmed())
+            logger::report("SKCOPY f=%u mod=%d comp=%d vs-cb2=%llx cb4=%llx%s -> skeleton #%u (%s, rms %.3f)",
+                g_frame_id, dm, comp, (unsigned long long)key, (unsigned long long)cb4_va, shadow ? " shadow" : "", slot,
+                why, best);
+    }
+    SkCopySeen& e = m.cur[at];
+    if (cb4_va && std::find(e.cb4_drawn.begin(), e.cb4_drawn.end(), cb4_va) == e.cb4_drawn.end()) e.cb4_drawn.push_back(cb4_va);
+    if (!shadow && cb4_va) {
+        if (e.cb4_va.size() <= (size_t)comp) {
+            e.cb4_va.resize((size_t)comp + 1, 0);
+            e.cb4_res.resize((size_t)comp + 1, nullptr);
+        }
+        if (!e.cb4_va[comp]) {
+            e.cb4_va[comp] = cb4_va;
+            e.cb4_res[comp] = cb4_res;
+        } else if (e.cb4_va[comp] != cb4_va && DiagOnce("SKCOPIES-SHARED", dm)) {
+            logger::write("SKCOPIES mod=%d comp=%d f=%u: vs-cb2 %llx is drawn with two bone CBs (%llx, %llx) -- copies under "
+                          "one per-object address share one skeleton",
+                dm, comp, g_frame_id, (unsigned long long)key, (unsigned long long)e.cb4_va[comp],
+                (unsigned long long)cb4_va);
+        }
+    }
+    return e.slot;
+}
+
+constexpr unsigned                            kSectionTexRegs = 9;
+constexpr uint32_t                            kSectexGap = 30; // frames unseen before a texture's next sighting is logged again
+static std::mutex                             g_sectex_mtx;
+static std::unordered_map<uint64_t, uint32_t> g_sectex_last; // hash | unread << 32 -> last frame a section saw it
+
+static uint16_t PublishSectionTextures(reshade::api::command_list* cmd_list, int dm, int comp, uint32_t rtv_count)
+{
+    const uint64_t layh = CmdGfxLayout(cmd_list);
+    RegBind        t_ps[kSectionTexRegs];
+    {
+        std::lock_guard l(g_layout_regmap_mtx);
+        auto            it = g_layout_regmap.find(layh);
+        if (it == g_layout_regmap.end() || !it->second.built) return 0;
+        memcpy(t_ps, it->second.t_ps, sizeof t_ps);
+    }
+    device*           dev = cmd_list->get_device();
+    const auto&       tabs = CmdGfx(cmd_list).tables;
+    const DxilSrvRegs ps_regs = PipelineSrvRegs(CmdGfx(cmd_list).gfx_pso, 'p');
+    uint16_t          pushed = 0;
+    for (unsigned r = 0; r < kSectionTexRegs; ++r) {
+        const RegBind& b = t_ps[r];
+        if (b.param == 0xFF || b.param >= 64 || !b.is_table) continue;
+        const bool read = ps_regs.reads(r);
+        if (!read && !g_debug) continue;
+        const TableStart ts = TableStartOf(dev, tabs[b.param]);
+        if (!ts) continue;
+        ResInfo ri;
+        if (!g_heap_to_res.find({ ts.heap, ts.base + b.offset }, ri) || !ri.res) continue;
+        const uint32_t resident = TexHashOf(reinterpret_cast<uint64_t>(ri.res));
+        const uint32_t hash = !resident || PortApi::TextureHashHasSections(resident)
+            ? resident
+            : TexLodTargetOf(resident, g_geomods[dm].wcl_ns.c_str());
+        if (!hash || !PortApi::TextureHashHasSections(hash)) continue;
+        if (read) {
+            PortApi::PushGameTexture('p', r, ri.res, hash);
+            pushed |= (uint16_t)(1u << r);
+        }
+        if (g_debug) {
+            bool appeared;
+            {
+                std::lock_guard l(g_sectex_mtx);
+                uint32_t&       last = g_sectex_last[(uint64_t)hash | (read ? 0ull : 1ull << 32)];
+                appeared = !last || g_frame_id - last > kSectexGap;
+                last = g_frame_id;
+            }
+            if (appeared || g_sectex_watch.load(std::memory_order_relaxed) > 0) {
+                uint64_t ps_hash = 0;
+                cmd_list->get_private_data(s_iid_ps_hash, &ps_hash);
+                char lod[24] = "";
+                if (hash != resident) sprintf_s(lod, " (its mip %08x)", resident);
+                logger::write("SECTEX f=%u mod=%d comp=%d ps-t%u rtv=%u: %08x%s res=%p at %llx+%u, written %u frame(s) "
+                              "ago (src %u), ps=%016llx %s -- %s",
+                    g_frame_id, dm, comp, r, rtv_count, hash, lod, (void*)ri.res, (unsigned long long)ts.heap,
+                    ts.base + b.offset, g_frame_id - ri.wrote_frame, (unsigned)ri.wrote_src,
+                    (unsigned long long)ps_hash,
+                    !read ? "does NOT read it: not published" : ps_regs.parsed ? "reads it"
+                                                                               : "(no PSV) published",
+                    appeared ? "first sighting in 30+ frames" : "watch: a mod switched itself back on");
+            }
+        }
+    }
+    return pushed;
+}
+
+bool DrawComponent(InjectFrame& fr, int dm, const WwmiMod::Component* wc)
+{
+    const DrawArgs&                   da = fr.da;
+    DrawClaim&                        dc = fr.dc;
+    reshade::api::command_list* const cmd_list = da.cmd_list;
+    ID3D12GraphicsCommandList* const  d3d12_cl = da.d3d12_cl;
+    const uint32_t                    index_count = da.index_count;
+    const uint32_t                    first_index = da.first_index;
+    const int32_t                     vertex_offset = da.vertex_offset;
+    const uint32_t                    first_instance = da.first_instance;
+    const uint64_t                    vs_hash = da.vs_hash;
+    const CmdRT&                      draw_rt = da.draw_rt;
+    uint64_t&                         game_cb13_va = dc.cb13_va;
+    ID3D12Resource*&                  port_cb4_res = dc.port_cb4_res;
+    uint64_t&                         port_cb4_va = dc.port_cb4_va;
+    ID3D12Resource*&                  port_cb3_res = dc.port_cb3_res;
+    uint64_t&                         port_cb3_va = dc.port_cb3_va;
+    int&                              game_cb13_root = dc.cb13_root;
+    int&                              game_cb14_root = dc.cb14_root;
+    bool&                             is_full_shadow_pass = dc.full_shadow;
+    unsigned&                         reloc_vb_mask = fr.reloc_vb_mask;
+    RelocXition(&reloc_xit)[9] = fr.reloc_xit;
+    unsigned&  reloc_xit_n = fr.reloc_xit_n;
+    const bool save_ib_set = fr.save_ib_set;
+    bool&      x32_mid = fr.x32_mid;
+    unsigned&  x32_mid_restores = fr.x32_mid_restores;
+    unsigned&  x32_mid_skipped = fr.x32_mid_skipped;
+    auto       restore_state = [&]() { RestoreGameState(fr); };
+    PROF(PROF_DI_DrawComp);
+    if (dm < 0 || dm >= (int)g_geomods.size()) return false;
+    uint32_t did = 0;
+    if (g_wcl_draw && wc) {
+        // DI:CompSetup: everything before PortSect; ended right before it (a span, not a block).
+        ProfScope           _di_compsetup(PROF_DI_CompSetup);
+        ProfScope           _cs_prep(PROF_CS_Prep);
+        const std::wstring& uns = g_geomods[dm].wcl_ns;
+        const std::wstring  fq = PortComponentSection(dm, wc->index, uns);
+
+        if (!fq.empty()) {
+            bool      skip_orig = false;
+            PortHooks hk;
+            hk.handling_skip = [&] { skip_orig = true; };
+            static std::wstring s_rfx_glowmap_fq;
+            static std::wstring s_rfx_fxmap_fq;
+            std::wstring&       rfx_glowmap_fq = s_rfx_glowmap_fq; // last GlowMap ref no Run has consumed yet
+            std::wstring&       rfx_fxmap_fq = s_rfx_fxmap_fq;     // last FXMap ref: the cutout's input
+            RfxGlowState        rfx_glow;                          // draw_inject.h
+            std::wstring        rfx_diffuse_fq;
+            std::wstring        rfx_normal_fq;
+            std::wstring        rfx_light_fq;
+            std::wstring        rfx_material_fq;
+            std::wstring        rfx_cutout_fq;
+            std::wstring        rfx_special_fq;
+            RfxTexLatch         rfx_tex; // draw_inject.h
+            hk.resource_ref = [&](const std::wstring& lhs_fq, const std::wstring& rhs_fq) {
+                if (lhs_fq.find(L"rabbitfx") == std::wstring::npos) return;
+                if (lhs_fq.find(L"glowmap") != std::wstring::npos)
+                    rfx_glowmap_fq = rhs_fq;
+                else if (lhs_fq.find(L"fxmap") != std::wstring::npos)
+                    rfx_fxmap_fq = rhs_fq;
+                else if (lhs_fq.find(L"diffuse") != std::wstring::npos)
+                    rfx_diffuse_fq = rhs_fq;
+                else if (lhs_fq.find(L"normalmap") != std::wstring::npos)
+                    rfx_normal_fq = rhs_fq;
+                else if (lhs_fq.find(L"lightmap") != std::wstring::npos)
+                    rfx_light_fq = rhs_fq;
+                else if (lhs_fq.find(L"materialmap") != std::wstring::npos)
+                    rfx_material_fq = rhs_fq;
+                else if (lhs_fq.find(L"cutoutmap") != std::wstring::npos)
+                    rfx_cutout_fq = rhs_fq;
+                else if (lhs_fq.find(L"specialmap") != std::wstring::npos)
+                    rfx_special_fq = rhs_fq;
+            };
+            hk.run_cmd = [&](const std::wstring& /*n*/, const std::wstring& target_fq) {
+                if (target_fq.find(L"rabbitfx") == std::wstring::npos) return;
+                // SetTextures (texture-binding half).
+                if (target_fq.find(L"settextures") != std::wstring::npos) {
+                    auto                        srv = [&](const std::wstring& fq) { return RfxMapSrv(fq, uns.c_str()); };
+                    D3D12_CPU_DESCRIPTOR_HANDLE d = srv(rfx_diffuse_fq);
+                    D3D12_CPU_DESCRIPTOR_HANDLE n = srv(rfx_normal_fq);
+                    D3D12_CPU_DESCRIPTOR_HANDLE l = srv(rfx_light_fq);
+                    D3D12_CPU_DESCRIPTOR_HANDLE m = srv(rfx_material_fq);
+                    const bool                  pending = (!rfx_diffuse_fq.empty() && !d.ptr) || (!rfx_normal_fq.empty() && !n.ptr) ||
+                        (!rfx_light_fq.empty() && !l.ptr) || (!rfx_material_fq.empty() && !m.ptr);
+                    rfx_tex = pending ? RfxTexLatch{} : RfxTexLatch{ d, n, l, m }; // the draws below read the latch, not the strings
+                    if (g_debug) {
+                        const D3D12_CPU_DESCRIPTOR_HANDLE cut = srv(rfx_cutout_fq);
+                        const D3D12_CPU_DESCRIPTOR_HANDLE spc = srv(rfx_special_fq);
+                        const int                         k = CompKey(dm, wc ? wc->index : 0);
+                        const int                         mask = (d.ptr ? 1 : 0) | (n.ptr ? 2 : 0) | (l.ptr ? 4 : 0) | (m.ptr ? 8 : 0) |
+                            (cut.ptr ? 16 : 0) | (spc.ptr ? 32 : 0);
+                        if (DiagChanged("RABBITFX-TEX", k, (unsigned long long)(unsigned)mask))
+                            logger::write("RABBITFX-TEX f=%u mod=%d comp=%d diffuse=%ls(srv=%llx) "
+                                          "normal=%ls(srv=%llx) light=%ls(srv=%llx) material=%ls(srv=%llx) "
+                                          "cutout=%ls(srv=%llx, not bound on DX12) special=%ls(srv=%llx, not bound on DX12)%s",
+                                g_frame_id, dm, wc ? wc->index : -1,
+                                rfx_diffuse_fq.c_str(), (unsigned long long)d.ptr,
+                                rfx_normal_fq.c_str(), (unsigned long long)n.ptr,
+                                rfx_light_fq.c_str(), (unsigned long long)l.ptr,
+                                rfx_material_fq.c_str(), (unsigned long long)m.ptr,
+                                rfx_cutout_fq.c_str(), (unsigned long long)cut.ptr,
+                                rfx_special_fq.c_str(), (unsigned long long)spc.ptr,
+                                pending ? "  -- a named map is not loaded: the game's textures stay" : "");
+                    }
+                    return;
+                }
+                float                       h = PortApi::GetVar(L"rabbitfx\\h", 0.f);
+                float                       br = PortApi::GetVar(L"rabbitfx\\brightness", 0.f);
+                float                       ip = PortApi::GetVar(L"rabbitfx\\interpolate", 0.f);
+                float                       s = PortApi::GetVar(L"rabbitfx\\s", 0.f);
+                float                       v = PortApi::GetVar(L"rabbitfx\\v", 0.f);
+                D3D12_CPU_DESCRIPTOR_HANDLE glow = rfx_glowmap_fq.empty() ? D3D12_CPU_DESCRIPTOR_HANDLE{ 0 }
+                                                                          : WclModSrvByResourceFq(rfx_glowmap_fq);
+                D3D12_CPU_DESCRIPTOR_HANDLE fxm = rfx_fxmap_fq.empty() ? D3D12_CPU_DESCRIPTOR_HANDLE{ 0 }
+                                                                       : WclModSrvByResourceFq(rfx_fxmap_fq);
+                rfx_glow.hue = (h / 360.0f) * ip;
+                rfx_glow.sat = (s / 100.0f) * ip;
+                rfx_glow.val = (v / 100.0f) * ip;
+                rfx_glow.brightness = br;
+                rfx_glow.map = glow;
+                rfx_glow.fxmap = fxm;
+                rfx_glow.active = (glow.ptr != 0); // brightness==0 is RECOLOUR, not "off" -- the ini writes o3 either way
+                if (rfx_glow.active) ++g_rfx_glow_params;
+                if (g_debug && DiagOnce("RABBITFX-INVOKE", CompKey(dm, wc ? wc->index : 0) * 8 + (int)((glow.ptr ? 1u : 0u) | (fxm.ptr ? 2u : 0u) | (br != 0.f ? 4u : 0u)))) {
+                    logger::write("RABBITFX invoke mod=%d comp=%d h=%.1f s=%.1f v=%.1f brightness=%.2f interpolate=%.2f glowmap=%ls srv=%llx fxmap=%ls srv=%llx -> glow %s%s",
+                        dm, wc ? wc->index : -1, h, s, v, br, ip, rfx_glowmap_fq.c_str(), (unsigned long long)glow.ptr,
+                        rfx_fxmap_fq.c_str(), (unsigned long long)fxm.ptr,
+                        rfx_glow.active ? "ARMED" : "inactive(no glow map)",
+                        fxm.ptr ? "; FX map present" : "");
+                }
+            };
+            ID3D12Resource* x24_vb6_res = nullptr;
+            uint64_t        x24_vb6_va = 0;
+            uint32_t        x24_vb6_bytes = 0;
+            uint8_t         x24_vb6_verdict = 0;
+            bool            rtpal_no_merge = false; // RTPAL published a palette for a component that merges no skeleton
+            SectionDraw     sd{ fr, dm, wc, hk, did, rfx_glow, rfx_tex,
+                x24_vb6_res, x24_vb6_va, x24_vb6_bytes, x24_vb6_verdict, rtpal_no_merge };
+            hk.drawindexed = [&](uint32_t c, uint32_t s2, uint32_t b2) { SectionDrawIndexed(sd, c, s2, b2); };
+            {
+                static std::atomic<bool> once{ false };
+                if (!once.exchange(true))
+                    logger::write("PORTDRAW first component dispatch: mod=%d comp=%d fq='%ls'",
+                        dm, wc->index, fq.c_str());
+            }
+            _cs_prep.End();
+            std::optional<PortApi::EngineScope> port_scope;
+            {
+                PROF(PROF_DI_EngLock);
+                port_scope.emplace();
+            }
+            ProfScope _cs_restore(PROF_CS_Restore);
+            struct PortRestore {
+                ID3D12GraphicsCommandList*             cl = nullptr;
+                ID3D12DescriptorHeap*                  srv = nullptr;
+                ID3D12DescriptorHeap*                  smp = nullptr;
+                std::vector<std::pair<UINT, uint64_t>> tables;
+                void*                                  inner_user = nullptr;
+                bool*                                  mid = nullptr; // X32: raised around the inner call so restore_state knows it is mid-section
+                ID3D12PipelineState*                   pso = nullptr;
+            } port_restore;
+            {
+                const auto&                   tabs = CmdGfx(cmd_list).tables;
+                const uint64_t                layh = CmdGfxLayout(cmd_list);
+                std::vector<LayoutTableParam> ltabs;
+                if (layh) {
+                    std::lock_guard l(g_layout_tables_mtx);
+                    auto            it = g_layout_tables.find(layh);
+                    if (it != g_layout_tables.end()) ltabs = it->second;
+                }
+                for (const auto& t : ltabs) {
+                    const TableStart ts = TableStartOf(cmd_list->get_device(), tabs[t.param]);
+                    if (!ts) continue;
+                    auto* hp = ts.Heap();
+                    if (t.kind == 1 && !port_restore.srv) port_restore.srv = hp;
+                    if (t.kind == 0 && !port_restore.smp) port_restore.smp = hp;
+                    port_restore.tables.emplace_back((UINT)t.param, (uint64_t)tabs[t.param].handle);
+                }
+                if (ID3D12DescriptorHeap* gh = GameHeap(cmd_list, 0)) port_restore.srv = gh;
+                if (ID3D12DescriptorHeap* gh = GameHeap(cmd_list, 1)) port_restore.smp = gh;
+                port_restore.cl = d3d12_cl;
+                port_restore.inner_user = &restore_state;
+                port_restore.mid = &x32_mid; // X32
+                {
+                    port_restore.pso = reinterpret_cast<ID3D12PipelineState*>(CmdGfx(cmd_list).gfx_restore());
+                }
+            }
+            static thread_local int t_cb4_root = -1;
+            static thread_local int t_cb3_root = -1;
+            t_cb4_root = game_cb13_root;
+            t_cb3_root = game_cb14_root;
+            std::optional<PortApi::DrawListScope> port_list;
+            if (g_port_draw_list)
+                port_list.emplace(d3d12_cl, [](void* u) {
+                        auto* r = static_cast<PortRestore*>(u);
+                        if (r->pso) r->cl->SetPipelineState(r->pso);
+                        if (MigotoPort::TakeHeapsChanged()) {
+                            if (r->srv) {
+                                ID3D12DescriptorHeap* h[2] = { r->srv, r->smp };
+                                r->cl->SetDescriptorHeaps(r->smp ? 2 : 1, h);
+                            } else if (g_debug && DiagOnce("HEAPRESTORE-NOSRV", 0)) {
+                                logger::write("HEAPRESTORE: our heaps were set on this list and the game's CBV_SRV_UAV heap is unknown -- ours stay set");
+                            }
+                        }
+                        for (const auto& t : r->tables)
+                            r->cl->SetGraphicsRootDescriptorTable(t.first,
+                                D3D12_GPU_DESCRIPTOR_HANDLE{ t.second });
+                        if (r->mid) *r->mid = true;
+                        (*static_cast<decltype(restore_state)*>(r->inner_user))();
+                        if (r->mid) *r->mid = false; }, &port_restore, [](void*, unsigned slot) -> int { return slot == 4 ? t_cb4_root : slot == 3 ? t_cb3_root
+                                                                                                                                                        : -1; }, nullptr);
+            struct PushCbGuard {
+                ~PushCbGuard()
+                {
+                    PortApi::PushGameConstantBuffer('v', 4, nullptr, 0, 0);
+                    PortApi::PushGameConstantBuffer('v', 3, nullptr, 0, 0);
+                    if (g_push_game_vb)
+                        PortApi::PushGameVertexBuffer(0, nullptr, 0, 0, 0, 0);
+                }
+            } push_cb_guard;
+            _cs_restore.End();
+            ProfScope _cs_push(PROF_CS_Push);
+            ++g_port_sect_runs;
+            if (port_cb4_res)
+                SkelDumpNoteDrawCbs(port_cb4_res, port_cb4_va, game_cb13_root,
+                    port_cb3_res, port_cb3_va, game_cb14_root);
+            if (!port_cb4_res) ++g_port_sect_nocb;
+            if (logger::enabled(1) && DiagOnce("PORTCB", CompKey(dm, wc->index))) {
+                logger::write("PORTCB mod=%d comp=%d cb13res=%p va=%llx cb13root=%d  "
+                              "cb14res=%p va=%llx cb14root=%d %s",
+                    dm, wc->index, (void*)port_cb4_res, (unsigned long long)port_cb4_va,
+                    game_cb13_root, (void*)port_cb3_res, (unsigned long long)port_cb3_va,
+                    game_cb14_root,
+                    port_cb4_res ? "" : "*** NO BONE CB -- vs-cb4 will read UNBOUND ***");
+            }
+            const uint64_t draw_pso = CmdGfx(cmd_list).gfx_pso;
+            auto           cb_width = [&](unsigned reg) -> unsigned {
+                uint32_t decl = 0;
+                if (!PipelineVsCbufferBytes(draw_pso, reg, decl)) return kDx11SkeletonCbByteWidth;
+                return decl == kBonesCbufferBytes ? kDx11SkeletonCbByteWidth : decl;
+            };
+            const RtPalResult pal = RtPalPublish(draw_pso, dm, wc, port_cb4_va);
+            if (pal.published) {
+                t_cb4_root = -1;
+                rtpal_no_merge = pal.no_merge;
+            }
+            constexpr unsigned kNotSkeletonWidth = 256;
+            if (!pal.published) PortApi::PushGameConstantBuffer('v', 4, port_cb4_res, port_cb4_va,
+                pal.tried ? kNotSkeletonWidth : cb_width(4));
+            unsigned w3 = cb_width(3);
+            if (pal.tried && w3 == kDx11SkeletonCbByteWidth) {
+                uint32_t   decl = 0;
+                const bool parsed = PipelineVsCbufferBytes(draw_pso, 3, decl);
+                if (DiagOnce("RTPAL-CB3", (int)(draw_pso ^ (draw_pso >> 32))))
+                    logger::write("RTPAL-CB3 pso=%llx mod=%d comp=%d: b3 would have been published as a skeleton "
+                                  "(declared %u B, %s) -- published at %u B instead",
+                        (unsigned long long)draw_pso, dm, wc->index, decl,
+                        parsed ? "read" : "declarations NOT read", kNotSkeletonWidth);
+                w3 = kNotSkeletonWidth;
+            }
+            PortApi::PushGameConstantBuffer('v', 3, port_cb3_res, port_cb3_va, w3);
+
+            if (g_push_game_vb) {
+                uint64_t        gva[8] = {};
+                uint32_t        gsz[8] = {};
+                uint32_t        gstr[8] = {};
+                ID3D12Resource* gres[8] = {};
+                {
+                    auto const& gs = CmdGfx(cmd_list);
+                    for (unsigned s = 0; s < 8; ++s) {
+                        gva[s] = gs.vb_va[s];
+                        gsz[s] = gs.vb_size[s];
+                        gstr[s] = gs.vb_stride[s];
+                        gres[s] = gs.vb_res[s];
+                    }
+                }
+                for (unsigned s = 0; s < 1; ++s) {
+                    if (!gres[s] || !gva[s]) {
+                        PortApi::PushGameVertexBuffer(s, nullptr, 0, 0, 0, 0);
+                        continue;
+                    }
+                    const uint64_t base = gres[s]->GetGPUVirtualAddress();
+                    const unsigned off = (gva[s] >= base) ? (unsigned)(gva[s] - base) : 0u;
+                    PortApi::PushGameVertexBuffer(s, gres[s], base, gsz[s] + off, gstr[s], off);
+                }
+                if (logger::enabled(1) && ProbeArmed() && DiagOnce("PORTVB", CompKey(dm, wc ? wc->index : 0))) {
+                    logger::write("PORTVB mod=%d comp=%d vb0res=%p va=%llx size=%u stride=%u %s",
+                        dm, wc ? wc->index : -1, (void*)gres[0], (unsigned long long)gva[0],
+                        gsz[0], gstr[0],
+                        gres[0] ? "" : "*** NO vb0 -- `ref vb0` will capture NOTHING ***");
+                }
+            }
+
+            if (!is_full_shadow_pass && wc && game_cb13_va) {
+                std::lock_guard<std::mutex> l(g_comp_bone_mtx);
+                g_comp_bone[(uint32_t)((dm << 8) | (wc->index & 0xff))] = { game_cb13_va, g_frame_id };
+            }
+            uint64_t sh_restore_va = 0;
+            if (is_full_shadow_pass && wc &&
+                game_cb13_root >= 0 && game_cb13_root < 64) {
+                uint64_t own = 0;
+                {
+                    std::lock_guard<std::mutex> l(g_comp_bone_mtx);
+                    auto                        it = g_comp_bone.find((uint32_t)((dm << 8) | (wc->index & 0xff)));
+                    if (it != g_comp_bone.end() &&
+                        (uint32_t)(g_frame_id - it->second.frame) <= 2u)
+                        own = it->second.va;
+                }
+                if (!game_cb13_va) {
+                    if (DiagOnce("SHADOWBONE-REFUSED", CompKey(dm, wc->index)))
+                        logger::write("SHADOWBONE mod=%d comp=%d REFUSED: the game bound NO CB "
+                                      "at root %d on this pass, so we cannot know the register "
+                                      "is a bone CB here -- and would have nothing to restore",
+                            dm, wc->index, game_cb13_root);
+                }
+                if (own && game_cb13_va && own != game_cb13_va) {
+                    d3d12_cl->SetGraphicsRootConstantBufferView((UINT)game_cb13_root, own);
+                    sh_restore_va = game_cb13_va; // put the game's back after our draw
+                    if (logger::enabled(1)) {
+                        if (DiagOnce("SHADOWBONE-RESTORED", CompKey(dm, wc->index)))
+                            logger::write("SHADOWBONE mod=%d comp=%d root=%d inherited=%llx "
+                                          "-> own=%llx (per-component CB restored)",
+                                dm, wc->index, game_cb13_root,
+                                (unsigned long long)game_cb13_va,
+                                (unsigned long long)own);
+                    }
+                }
+            }
+            ID3D12Resource* sk_inst = nullptr;
+            {
+                auto const& gs = CmdGfx(cmd_list);
+                if (gs.vb_stride[6]) sk_inst = gs.vb_res[6];
+            }
+            bool           sk_first = false;
+            const unsigned sk_copy = SkCopySlot(cmd_list, dm, wc->index, port_cb4_res, port_cb4_va, is_full_shadow_pass,
+                &sk_first);
+            if (g_sk_run_passes) {
+                GpuBracket _gt(d3d12_cl, GT_ShapeKeys);
+                RunShapeKeyPasses(uns, dm, sk_inst, cmd_list);
+            }
+            _cs_push.End();
+            ProfScope             _cs_reloc(PROF_CS_Reloc);
+            MorphDump::DrawRecord i8_row{};
+            bool                  i8_pending = false;
+            unsigned long long    i8_nulls_before = 0;
+            if (d3d12_cl) {
+                uint64_t        gva[8] = {};
+                uint32_t        gstr[8] = {};
+                ID3D12Resource* gres[8] = {};
+                uint32_t        ifmt = 0;
+                ID3D12Resource* ires = nullptr;
+                {
+                    auto const& gs = CmdGfx(cmd_list);
+                    for (unsigned q = 0; q < 8; ++q) {
+                        gva[q] = gs.vb_va[q];
+                        gstr[q] = gs.vb_stride[q];
+                        gres[q] = gs.vb_res[q];
+                    }
+                    ifmt = gs.ib_index_bytes;
+                    ires = gs.ib_res;
+                }
+                SkNoteDrawVbs(dm, gres, 8);
+                auto xit_in = [&](ID3D12Resource* r, D3D12_RESOURCE_STATES to) -> bool {
+                    if (!r || reloc_xit_n >= 9) return false;
+                    reloc_xit[reloc_xit_n++] = { r, MigotoPort::OwnedTransition(d3d12_cl, r, to) };
+                    return true;
+                };
+                SkBufferBinding       my_u0b{};
+                const bool            have_my_u0 = SkGetBinding(g_geomods[dm].wcl_ns, sk_inst, TargetClass::UnorderedAccessView, 0, &my_u0b);
+                ID3D12Resource* const my_u0 = my_u0b.res;
+                uint8_t               v6 = 3;
+                uint64_t              v6_sub_va = 0;
+                uint32_t              v6_sub_bytes = 0;
+                ID3D12Resource*       v6_sub_res = nullptr;
+                uint64_t              v6_sub_off = 0;
+                bool                  v6_xit = false;
+                for (unsigned q = 0; q < 8; ++q) {
+                    RelocBuf rb{};
+                    if (!gstr[q] || !g_buffer_reloc.Resolve(gres[q], &rb)) {
+                        if (q == 6) v6 = gstr[q] ? 0 : 3;
+                        continue;
+                    }
+                    if (!have_my_u0 || rb.res != my_u0) {
+                        if (q == 6) v6 = 2;
+                        if (logger::enabled(1)) {
+                            static const char kRelocBindSite = 0;
+                            if (DiagOnce((const void*)&kRelocBindSite, dm * 8 + (int)q))
+                                logger::write("RELOCBIND mod=%d vb%u: DECLINED -- the widened "
+                                              "buffer for this resource (%p) is not this mod's "
+                                              "u0 (%p, have=%d); binding it would hand this "
+                                              "draw another character's morphs",
+                                    dm, q, (void*)rb.res, (void*)my_u0,
+                                    (int)have_my_u0);
+                        }
+                        continue;
+                    }
+                    const bool               xin = xit_in(rb.res, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
+                    D3D12_VERTEX_BUFFER_VIEW nv{ rb.va, (UINT)rb.bytes, gstr[q] };
+                    d3d12_cl->IASetVertexBuffers(q, 1, &nv);
+                    reloc_vb_mask |= (1u << q);
+                    if (q == 6) {
+                        v6 = 1;
+                        v6_sub_va = rb.va;
+                        v6_sub_bytes = (uint32_t)rb.bytes;
+                        v6_sub_res = rb.res;
+                        v6_xit = xin;
+                        const uint64_t base = rb.res->GetGPUVirtualAddress();
+                        v6_sub_off = (rb.va >= base) ? (rb.va - base) : 0;
+                        x24_vb6_res = rb.res;
+                        x24_vb6_va = rb.va;
+                        x24_vb6_bytes = (uint32_t)rb.bytes;
+                        x24_vb6_verdict = 1; // X24
+                    }
+                    if (logger::enabled(1)) {
+                        if (DiagOnce("RELOCBIND", dm * 8 + (int)q))
+                            logger::write("RELOCBIND mod=%d vb%u: %llx -> %llx/%llu (stride %u)"
+                                          " -- the draw now reads the WIDENED buffer the chain "
+                                          "writes",
+                                dm, q, (unsigned long long)gva[q],
+                                (unsigned long long)rb.va,
+                                (unsigned long long)rb.bytes, gstr[q]);
+                    }
+                }
+                RelocBuf rb{};
+                if (ires && ifmt && save_ib_set && g_buffer_reloc.Resolve(ires, &rb)) {
+                    xit_in(rb.res, D3D12_RESOURCE_STATE_INDEX_BUFFER);
+                    D3D12_INDEX_BUFFER_VIEW ni{ rb.va, (UINT)rb.bytes,
+                        ifmt == 2 ? DXGI_FORMAT_R16_UINT : DXGI_FORMAT_R32_UINT };
+                    d3d12_cl->IASetIndexBuffer(&ni);
+                }
+                const bool i8 = MorphDump::Armed();
+                const bool i9 = (v6 == 1) && v6_sub_res && MigotoPort::SkCapArmed();
+                if (i8 || i9) {
+                    const uint8_t is_depth = (draw_rt.rtv_count == 0 && draw_rt.has_dsv) ? 1 : 0;
+                    const int     comp_ix = wc ? wc->index : -1;
+                    if (i9) {
+                        static std::atomic<unsigned> s_dseq{ 0 };
+                        char                         prov[72];
+                        sprintf_s(prov, "D f=%u m=%d c=%d l=%llx d=%u x=%d n=%u fi=%u",
+                            g_frame_id, dm, comp_ix,
+                            (unsigned long long)reinterpret_cast<uintptr_t>(d3d12_cl),
+                            (unsigned)is_depth, (int)v6_xit, index_count, first_index);
+                        MigotoPort::SkCapSnapDraw(g_d3d12_device, d3d12_cl, "vb6", v6_sub_res,
+                            v6_sub_off, v6_sub_bytes,
+                            v6_xit ? D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER
+                                   : D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                            1000u + s_dseq.fetch_add(1, std::memory_order_relaxed),
+                            prov);
+                    }
+                    if (i8) {
+                        MorphDump::DrawRecord& w = i8_row;
+                        w.frame = g_frame_id;
+                        w.mod_id = dm;
+                        w.comp = comp_ix;
+                        w.list = reinterpret_cast<uint64_t>(d3d12_cl);
+                        w.index_count = index_count;
+                        w.first_index = first_index;
+                        w.vertex_offset = vertex_offset;
+                        w.is_depth = is_depth;
+                        w.vb6_res = reinterpret_cast<uint64_t>(gres[6]);
+                        w.vb6_va = gva[6];
+                        w.vb6_stride = gstr[6];
+                        if (gres[6]) {
+                            std::lock_guard lock(g_mem_mutex);
+                            auto            vi = g_res_to_va.find(reinterpret_cast<uint64_t>(gres[6]));
+                            if (vi != g_res_to_va.end()) {
+                                auto ri = g_va_to_res.find(vi->second);
+                                if (ri != g_va_to_res.end()) w.vb6_bytes = ri->second.size;
+                            }
+                        }
+                        w.vb6_verdict = v6;
+                        w.sub_va = v6_sub_va;
+                        w.sub_bytes = v6_sub_bytes;
+                        w.my_u0 = reinterpret_cast<uint64_t>(my_u0);
+                        w.vb0_res = reinterpret_cast<uint64_t>(gres[0]);
+                        w.ns = g_geomods[dm].wcl_ns.c_str();
+                        i8_pending = true;
+                        i8_nulls_before = MigotoPort::VbNullUnbinds();
+                    }
+                }
+            }
+            _cs_reloc.End();
+            ProfScope      _cs_secttex(PROF_CS_SectTex);
+            const uint16_t sect_tex = PublishSectionTextures(cmd_list, dm, wc->index, draw_rt.rtv_count);
+            if (MorphDump::Armed())
+                hk.cs_enter = [](const std::wstring&, const std::wstring& t) {
+                    if (t.find(L"skeletonmerger") != std::wstring::npos) ++t_x23_merges; };
+            _cs_secttex.End();
+            _di_compsetup.End();
+            bool ran;
+            {
+                PROF(PROF_DI_PortSect);
+                g_sections_this_frame.fetch_add(1, std::memory_order_relaxed); // GTEXMISS: sections before a miss
+                std::optional<PortApi::SkelCopyScope> sk_scope;
+                if (sk_copy || sk_first) sk_scope.emplace(uns.c_str(), sk_copy);
+                ran = PortRunSection(fq, hk, index_count, first_index, first_instance,
+                    skip_orig);
+            }
+            for (unsigned r = 0; r < kSectionTexRegs; ++r)
+                if (sect_tex & (1u << r)) PortApi::UnpushGameTexture('p', r);
+            PROF(PROF_DI_CompPost); // to the end of this block, every return included
+            if (x32_mid_restores) {
+                g_x32_mid_total.fetch_add(x32_mid_restores, std::memory_order_relaxed);
+                g_x32_mid_skipped_total.fetch_add(x32_mid_skipped, std::memory_order_relaxed);
+                if (logger::enabled(1) && DiagOnce("X32-MID", CompKey(dm, wc->index)))
+                    logger::write("X32 MID-RESTORE mod=%d comp=%d vs=%016llx: the section issued %u engine "
+                                  "dispatch/draw(s) before its drawindexed and each one's restore callback "
+                                  "ran restore_state (reloc mask %u); IA rebinds skipped on %u of them. %s",
+                        dm, wc->index, (unsigned long long)vs_hash, x32_mid_restores, reloc_vb_mask,
+                        x32_mid_skipped,
+                        x32_mid_skipped == x32_mid_restores
+                            ? "The injected draw keeps the RELOCBIND substitution."
+                            : "A restore path skipped the mid-section guard: slot 6 went back to "
+                              "the GAME's vanilla morph buffer -- RE-OPEN.");
+            }
+            if (i8_pending) { // X9: what the section did to the slots after the verdict
+                const unsigned long long nb = MigotoPort::VbNullUnbinds();
+                i8_row.ini_null_unbinds = (nb > i8_nulls_before) ? (uint32_t)(nb - i8_nulls_before) : 0u;
+                i8_row.mid_restores = x32_mid_restores; // X32
+                i8_row.mid_ia_skipped = x32_mid_skipped;
+                MorphDump::RecordDraw(i8_row);
+            }
+            if (sh_restore_va)
+                d3d12_cl->SetGraphicsRootConstantBufferView((UINT)game_cb13_root, sh_restore_va);
+            if (logger::enabled(1)) {
+                if (DiagOnce("COMP-NS", CompKey(dm, wc->index))) {
+                    const std::wstring& u2 = g_geomods[dm].wcl_ns;
+                    logger::write("CHAINPROF post-section mod=%d comp=%d ns='%ls' "
+                                  "object_detected=%g state_id=%g mod_enabled=%g ran=%d",
+                        dm, wc->index, u2.c_str(),
+                        PortApi::GetVarNs(u2.c_str(), L"object_detected", -1.f),
+                        PortApi::GetVarNs(u2.c_str(), L"state_id", -1.f),
+                        PortApi::GetVarNs(u2.c_str(), L"mod_enabled", -1.f),
+                        (int)ran);
+                }
+            }
+            if (logger::enabled(1) && ran) {
+                const float              en = PortApi::GetVarNs(g_geomods[dm].wcl_ns.c_str(), L"mod_enabled", -1.f);
+                const unsigned long long v = ((unsigned long long)(en * 16.f + 64.f) << 8) | (did ? 2u : 0u) | (skip_orig ? 1u : 0u);
+                const int                key = (int)(((uint64_t)(unsigned)dm << 24) ^ ((uint64_t)(unsigned)wc->index << 20) ^ (reinterpret_cast<uintptr_t>(sk_inst) >> 4));
+                if (DiagChanged("MODDRAW", key, v))
+                    logger::write("MODDRAW f=%u mod=%d comp=%d inst=%p: mod_enabled=%g drew=%u skip=%d",
+                        g_frame_id, dm, wc->index, (void*)sk_inst, en, did, (int)skip_orig);
+            }
+            GeoMod& unit = g_geomods[dm];
+            ++unit.sect_runs;
+            if (ran && skip_orig) ++unit.skip_orig;
+            if (ran) unit.replaced += did;
+            if (ran) {
+                g_draw_replace_count += did;
+                g_wwmi_geom_count += did;
+                if (skip_orig || did > 0) return true;
+                ++g_port_fellback_count;
+                restore_state();
+                fr.mod_switched_off = PortApi::GetVarNs(uns.c_str(), L"mod_enabled", -1.f) == 0.f;
+                return false;
+            }
+        }
+    }
+    return false;
+}

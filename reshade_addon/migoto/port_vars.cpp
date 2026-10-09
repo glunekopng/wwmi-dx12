@@ -1,0 +1,264 @@
+// port_api: the engine's variables and custom resources, read and written by the addon.
+#include "port_api_internal.h"
+#include "globals.h"
+#include "IniHandler.h"
+#include "CommandList.h"
+#include "dx12_wrap.h"
+#include "port_keygate.h"
+#include <DDSTextureLoader.h>
+#include "../../src/log.h"
+
+#include <string>
+
+namespace PortApi {
+
+void ForEachVariable(void (*cb)(const wchar_t* fq_name, float value, bool persist, void* user), void* user)
+{
+    std::lock_guard<std::recursive_mutex> engine_lk(EngineLock());
+    if (!g_loaded || !cb) return;
+    for (auto& kv : command_list_globals) {
+        const CommandListVariable& v = kv.second;
+        const bool                 persist = !!(v.flags & VariableFlags::PERSIST);
+        cb(v.name.c_str(), v.fval, persist, user);
+    }
+}
+
+static std::wstring VarKey(const wchar_t* fq_name)
+{
+    std::wstring k = fq_name;
+    for (auto& ch : k) {
+        if (ch == L'/') ch = L'\\';
+        ch = (wchar_t)towlower(ch);
+    }
+    if (!k.empty() && k[0] == L'$') return k;
+    if (!k.empty() && k[0] != L'\\') k.insert(k.begin(), L'\\');
+    return L"$" + k;
+}
+
+// ns + name -> their fully-qualified key. The separator lives here, once, instead of at 15 call sites.
+static std::wstring JoinNs(const wchar_t* ns, const wchar_t* name)
+{
+    std::wstring s = ns ? ns : L"";
+    if (!s.empty() && s.back() != L'\\') s += L'\\';
+    return s + (name ? name : L"");
+}
+
+float GetVarNs(const wchar_t* ns, const wchar_t* name, float def)
+{
+    return GetVar(JoinNs(ns, name).c_str(), def);
+}
+
+bool SetVarNs(const wchar_t* ns, const wchar_t* name, float value)
+{
+    return SetVar(JoinNs(ns, name).c_str(), value);
+}
+
+float GetVar(const wchar_t* fq_name, float def)
+{
+    if (!g_loaded || !fq_name) return def;
+    std::lock_guard<std::recursive_mutex> engine_lk(EngineLock());
+    auto                                  it = command_list_globals.find(VarKey(fq_name));
+    return (it == command_list_globals.end()) ? def : it->second.fval;
+}
+
+bool SetVar(const wchar_t* fq_name, float value)
+{
+    if (!g_loaded || !fq_name) return false;
+    std::lock_guard<std::recursive_mutex> engine_lk(EngineLock());
+    auto                                  it = command_list_globals.find(VarKey(fq_name));
+    if (it == command_list_globals.end()) return false;
+    if (memcmp(&it->second.fval, &value, sizeof value) != 0 && MigotoPort::SelectionVarWatched(&it->second.fval))
+        MigotoPort::BumpSelectionInputs();
+    it->second.fval = value;
+    return true;
+}
+
+float* VarSlotNs(const wchar_t* ns, const wchar_t* name)
+{
+    if (!g_loaded) return nullptr;
+    std::lock_guard<std::recursive_mutex> engine_lk(EngineLock());
+    auto                                  it = command_list_globals.find(VarKey(JoinNs(ns, name).c_str()));
+    return it == command_list_globals.end() ? nullptr : &it->second.fval;
+}
+
+void SetVarSlot(float* slot, float value)
+{
+    if (!g_loaded || !slot) return;
+    std::lock_guard<std::recursive_mutex> engine_lk(EngineLock());
+    if (memcmp(slot, &value, sizeof value) != 0 && MigotoPort::SelectionVarWatched(slot))
+        MigotoPort::BumpSelectionInputs();
+    *slot = value;
+}
+
+bool VarSlotHolds(const float* slot, unsigned gen, float value)
+{
+    const volatile unsigned& live_gen = g_generation;
+    if (!slot || gen != live_gen) return false;
+    const float held = *static_cast<const volatile float*>(slot);
+    return gen == live_gen && memcmp(&held, &value, sizeof value) == 0;
+}
+
+ID3D12Resource* FindCustomResource(const wchar_t* fq_name)
+{
+    std::lock_guard<std::recursive_mutex> engine_lk(EngineLock());
+    if (!g_loaded || !fq_name) return nullptr;
+    auto it = customResources.find(fq_name);
+    if (it == customResources.end()) return nullptr;
+
+    it->second.Substantiate(g_dev.GetPassThroughOrigDevice1(),
+        (D3D11_BIND_FLAG)0, (D3D11_RESOURCE_MISC_FLAG)0);
+    MigotoPort::WrapResource* wr = MigotoPort::AsWrapResource(it->second.resource);
+    return wr ? wr->dx12 : nullptr;
+}
+
+ID3D12Resource* CustomResourceDx12(const void* custom)
+{
+    std::lock_guard<std::recursive_mutex> engine_lk(EngineLock());
+    if (!g_loaded || !custom) return nullptr;
+    CustomResource* r = const_cast<CustomResource*>(static_cast<const CustomResource*>(custom));
+    r->Substantiate(g_dev.GetPassThroughOrigDevice1(), (D3D11_BIND_FLAG)0, (D3D11_RESOURCE_MISC_FLAG)0);
+    MigotoPort::WrapResource* wr = MigotoPort::AsWrapResource(r->resource);
+    return wr ? wr->dx12 : nullptr;
+}
+
+bool GetBufferResource(const wchar_t* fq_name, BufferResourceInfo* out)
+{
+    if (!out) return false;
+    *out = BufferResourceInfo{};
+
+    std::lock_guard<std::recursive_mutex> engine_lk(EngineLock());
+    if (!g_loaded || !fq_name) return false;
+    auto it = customResources.find(fq_name);
+    if (it == customResources.end()) return false;
+
+    {
+        const CustomResourceType t = it->second.override_type;
+        const bool               declared_buffer = (t == CustomResourceType::BUFFER ||
+            t == CustomResourceType::STRUCTURED_BUFFER ||
+            t == CustomResourceType::RAW_BUFFER);
+        bool                     buf_file = false;
+        const std::wstring&      fn = it->second.filename;
+        if (fn.size() >= 4 && _wcsicmp(fn.c_str() + fn.size() - 4, L".buf") == 0) buf_file = true;
+
+        if (!it->second.substantiated && !declared_buffer && !buf_file) return false;
+
+        if (!it->second.substantiated)
+            it->second.Substantiate(g_dev.GetPassThroughOrigDevice1(),
+                (D3D11_BIND_FLAG)0, (D3D11_RESOURCE_MISC_FLAG)0);
+    }
+
+    MigotoPort::WrapResource* wr = MigotoPort::AsWrapResource(it->second.resource);
+    if (!wr || !wr->dx12) return false;
+    if (wr->dim != D3D11_RESOURCE_DIMENSION_BUFFER) return false; // textures go through the SRV walk
+
+    out->dx12 = wr->dx12;
+    out->gpu_va = (unsigned long long)wr->dx12->GetGPUVirtualAddress() + wr->gpu_va;
+    out->mappable = (wr->heap_type == D3D12_HEAP_TYPE_UPLOAD);
+
+    if (auto* wb = static_cast<MigotoPort::WrapBuffer*>(wr)) {
+        out->byte_width = wb->desc.ByteWidth;
+        out->stride = wb->desc.StructureByteStride;
+    }
+    if (it->second.stride) out->stride = it->second.stride;
+    if (!out->byte_width && it->second.buf_size) out->byte_width = it->second.buf_size;
+    return true;
+}
+
+void* AcquireBufferObject(const wchar_t* fq_name)
+{
+    std::lock_guard<std::recursive_mutex> engine_lk(EngineLock());
+    BufferResourceInfo                    bi;
+    if (!GetBufferResource(fq_name, &bi)) return nullptr; // substantiates only a buffer, as above
+    auto it = customResources.find(fq_name);
+    if (it == customResources.end() || !it->second.resource) return nullptr;
+    it->second.resource->AddRef();
+    return it->second.resource;
+}
+
+void ForEachUnsubstantiatedTexture(const wchar_t* ns, void (*cb)(const wchar_t* fq_name, const wchar_t* filename, void* user),
+    void*                                         user)
+{
+    std::lock_guard<std::recursive_mutex> engine_lk(EngineLock());
+    if (!g_loaded || !ns || !*ns || !cb) return;
+    const std::wstring prefix = std::wstring(L"resource\\") + ns + L"\\";
+    for (auto& kv : customResources) {
+        const CustomResource& r = kv.second;
+        if (r.substantiated || r.resource || r.view) continue;
+        const std::wstring& fn = r.filename;
+        if (fn.size() < 4 || _wcsicmp(fn.c_str() + fn.size() - 4, L".dds") != 0) continue;
+        if (_wcsnicmp(kv.first.c_str(), prefix.c_str(), prefix.size()) != 0) continue;
+        cb(kv.first.c_str(), fn.c_str(), user);
+    }
+}
+
+void BeginDeferredTextures(const wchar_t* ns, std::vector<DeferredTexture>& out)
+{
+    std::lock_guard<std::recursive_mutex> engine_lk(EngineLock());
+    if (!g_loaded || !ns || !*ns) return;
+    const std::wstring prefix = std::wstring(L"resource\\") + ns + L"\\";
+    for (auto& kv : customResources) {
+        CustomResource& r = kv.second;
+        if (r.substantiated || r.resource || r.view) continue;
+        const std::wstring& fn = r.filename;
+        if (fn.size() < 4 || _wcsicmp(fn.c_str() + fn.size() - 4, L".dds") != 0) continue;
+        if (_wcsnicmp(kv.first.c_str(), prefix.c_str(), prefix.size()) != 0) continue;
+        r.substantiated = true;                                                      // Substantiate's first act, so no draw loads it
+        r.bind_flags = (D3D11_BIND_FLAG)(r.bind_flags | D3D11_BIND_SHADER_RESOURCE); // the flag its assignment would add
+        if (r.override_bind_flags != CustomResourceBindFlags::INVALID)
+            r.bind_flags = (D3D11_BIND_FLAG)r.override_bind_flags;
+        if (r.override_misc_flags != ResourceMiscFlags::INVALID)
+            r.misc_flags = (D3D11_RESOURCE_MISC_FLAG)r.override_misc_flags;
+        out.push_back({ kv.first, fn, (unsigned)r.bind_flags, (unsigned)r.misc_flags,
+            r.override_color_space == CustomColorSpace::SRGB });
+    }
+}
+
+ID3D11Resource* LoadDeferredTexture(const DeferredTexture& t)
+{
+    EnsureCOM();
+    ID3D11Resource* res = nullptr;
+    const HRESULT   hr = DirectX::CreateDDSTextureFromFileEx(g_dev.GetPassThroughOrigDevice1(), t.filename.c_str(), 0,
+        D3D11_USAGE_DEFAULT, t.bind_flags, 0, t.misc_flags, t.force_srgb,
+        &res, nullptr, nullptr);
+    if (FAILED(hr)) logger::write("PORT: failed to load custom texture resource %ls: 0x%08x", t.filename.c_str(), (unsigned)hr);
+    return SUCCEEDED(hr) ? res : nullptr;
+}
+
+bool PublishDeferredTexture(const wchar_t* fq_name, ID3D11Resource* res)
+{
+    std::lock_guard<std::recursive_mutex> engine_lk(EngineLock());
+    if (!g_loaded || !fq_name || !res) return false;
+    auto it = customResources.find(fq_name);
+    if (it == customResources.end() || it->second.resource || it->second.view) return false;
+    CustomResource& r = it->second;
+    r.resource = res;
+    r.device = g_dev.GetPassThroughOrigDevice1();
+    r.is_null = false; // LoadFromFile's outcome
+    MigotoPort::BumpSelectionInputs();
+    return true;
+}
+
+bool SubstantiateTexture(const wchar_t* fq_name)
+{
+    std::lock_guard<std::recursive_mutex> engine_lk(EngineLock());
+    if (!g_loaded || !fq_name) return false;
+    auto it = customResources.find(fq_name);
+    if (it == customResources.end() || it->second.substantiated) return false;
+    it->second.Substantiate(g_dev.GetPassThroughOrigDevice1(), D3D11_BIND_SHADER_RESOURCE, (D3D11_RESOURCE_MISC_FLAG)0);
+    return it->second.resource != nullptr;
+}
+
+void ForEachCustomResource(void (*cb)(const wchar_t*, const wchar_t*, int, bool, ID3D12Resource*, void*),
+    void* user, bool (*want)(ID3D12Resource*, void*))
+{
+    if (!g_loaded || !cb) return;
+    std::lock_guard<std::recursive_mutex> engine_lk(EngineLock());
+    for (auto& kv : customResources) {
+        MigotoPort::WrapResource* wr = MigotoPort::AsWrapResource(kv.second.resource);
+        ID3D12Resource*           dx12 = wr ? wr->dx12 : nullptr;
+        if (want && !want(dx12, user)) continue;
+        cb(kv.first.c_str(), kv.second.filename.c_str(), (int)kv.second.override_type,
+            kv.second.substantiated, dx12, user);
+    }
+}
+} // namespace PortApi

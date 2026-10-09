@@ -1,0 +1,209 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="$(WwmiRefDir)">
+      <UniqueIdentifier>{7dff58aa-e7d4-5f70-954a-c3eb1a72a71a}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="$(WwmiRefDir)\crc32c-hw-1.0.5">
+      <UniqueIdentifier>{3d81fd60-5666-5ca4-b89f-dc01fba35600}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="$(WwmiRefDir)\crc32c-hw-1.0.5\src">
+      <UniqueIdentifier>{b2cf9fb4-e139-5298-9f17-2f2e56992e43}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="$(WwmiRefDir)\DirectXTK">
+      <UniqueIdentifier>{88c6bb48-f447-5989-a05f-17f2e2cad027}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="$(WwmiRefDir)\DirectXTK\Src">
+      <UniqueIdentifier>{6d554462-8133-5e2d-bd76-acb9f70f39fb}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="3Dmigoto (unmodified)">
+      <UniqueIdentifier>{d6272efc-d2de-536e-9d02-8371e78e4512}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="migoto">
+      <UniqueIdentifier>{d1bbf353-5445-5b2c-a132-d84e118d5ae2}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="$(WwmiPristineDir)\CommandList.cpp">
+      <Filter>3Dmigoto (unmodified)</Filter>
+    </ClCompile>
+    <ClCompile Include="reshade_addon\migoto\port_ini.cpp">
+      <Filter>migoto</Filter>
+    </ClCompile>
+    <ClCompile Include="reshade_addon\migoto\port_override.cpp">
+      <Filter>migoto</Filter>
+    </ClCompile>
+    <ClCompile Include="$(WwmiPristineDir)\ResourceHash.cpp">
+      <Filter>3Dmigoto (unmodified)</Filter>
+    </ClCompile>
+    <ClCompile Include="$(WwmiPristineDir)\profiling.cpp">
+      <Filter>3Dmigoto (unmodified)</Filter>
+    </ClCompile>
+    <ClCompile Include="$(WwmiPristineDir)\input.cpp">
+      <Filter>3Dmigoto (unmodified)</Filter>
+    </ClCompile>
+    <ClCompile Include="$(WwmiPristineDir)\util.cpp">
+      <Filter>3Dmigoto (unmodified)</Filter>
+    </ClCompile>
+    <ClCompile Include="$(WwmiPristineDir)\lock.cpp">
+      <Filter>3Dmigoto (unmodified)</Filter>
+    </ClCompile>
+    <ClCompile Include="$(WwmiPristineDir)\cursor.cpp">
+      <Filter>3Dmigoto (unmodified)</Filter>
+    </ClCompile>
+    <ClCompile Include="reshade_addon\migoto\port_globals.cpp">
+      <Filter>migoto</Filter>
+    </ClCompile>
+    <ClCompile Include="reshade_addon\migoto\dx12_context.cpp">
+      <Filter>migoto</Filter>
+    </ClCompile>
+    <ClCompile Include="reshade_addon\migoto\dx12_bridge.cpp">
+      <Filter>migoto</Filter>
+    </ClCompile>
+    <ClCompile Include="reshade_addon\migoto\dx12_context_impl.cpp">
+      <Filter>migoto</Filter>
+    </ClCompile>
+    <ClCompile Include="reshade_addon\migoto\dx12_device.cpp">
+      <Filter>migoto</Filter>
+    </ClCompile>
+    <ClCompile Include="reshade_addon\migoto\dx12_device_impl.cpp">
+      <Filter>migoto</Filter>
+    </ClCompile>
+    <ClCompile Include="reshade_addon\migoto\dx12_wrap.cpp">
+      <Filter>migoto</Filter>
+    </ClCompile>
+    <ClCompile Include="reshade_addon\migoto\dx12_pipeline.cpp">
+      <Filter>migoto</Filter>
+    </ClCompile>
+    <ClCompile Include="reshade_addon\migoto\dx12_skcap.cpp">
+      <Filter>migoto</Filter>
+    </ClCompile>
+    <ClCompile Include="reshade_addon\migoto\port_api.cpp">
+      <Filter>migoto</Filter>
+    </ClCompile>
+    <ClCompile Include="reshade_addon\migoto\hacker_context_shim.cpp">
+      <Filter>migoto</Filter>
+    </ClCompile>
+    <ClCompile Include="reshade_addon\migoto\port_vars.cpp">
+      <Filter>migoto</Filter>
+    </ClCompile>
+    <ClCompile Include="reshade_addon\migoto\port_publish.cpp">
+      <Filter>migoto</Filter>
+    </ClCompile>
+    <ClCompile Include="reshade_addon\migoto\port_parse_index.cpp">
+      <Filter>migoto</Filter>
+    </ClCompile>
+    <ClCompile Include="reshade_addon\migoto\port_dispatch.cpp">
+      <Filter>migoto</Filter>
+    </ClCompile>
+    <ClCompile Include="reshade_addon\migoto\port_keygate.cpp">
+      <Filter>migoto</Filter>
+    </ClCompile>
+    <ClCompile Include="reshade_addon\migoto\port_skel_copies.cpp">
+      <Filter>migoto</Filter>
+    </ClCompile>
+    <ClCompile Include="reshade_addon\migoto\frame_analysis_format.cpp">
+      <Filter>migoto</Filter>
+    </ClCompile>
+    <ClCompile Include="reshade_addon\migoto\frame_analysis_engine.cpp">
+      <Filter>migoto</Filter>
+    </ClCompile>
+    <ClCompile Include="reshade_addon\migoto\dx12_dump_readback.cpp">
+      <Filter>migoto</Filter>
+    </ClCompile>
+    <ClCompile Include="reshade_addon\migoto\dump_watchdog.cpp">
+      <Filter>migoto</Filter>
+    </ClCompile>
+    <ClCompile Include="reshade_addon\migoto\dump_preview.cpp">
+      <Filter>migoto</Filter>
+    </ClCompile>
+    <ClCompile Include="reshade_addon\migoto\dx12_input_layout.cpp">
+      <Filter>migoto</Filter>
+    </ClCompile>
+    <ClCompile Include="reshade_addon\migoto\frame_analysis_driver.cpp">
+      <Filter>migoto</Filter>
+    </ClCompile>
+    <ClCompile Include="$(WwmiRefDir)\DirectXTK\Src\DDSTextureLoader.cpp">
+      <Filter>$(WwmiRefDir)\DirectXTK\Src</Filter>
+    </ClCompile>
+    <ClCompile Include="$(WwmiRefDir)\DirectXTK\Src\WICTextureLoader.cpp">
+      <Filter>$(WwmiRefDir)\DirectXTK\Src</Filter>
+    </ClCompile>
+    <ClCompile Include="$(WwmiRefDir)\DirectXTK\Src\ScreenGrab.cpp">
+      <Filter>$(WwmiRefDir)\DirectXTK\Src</Filter>
+    </ClCompile>
+    <ClCompile Include="$(WwmiRefDir)\crc32c-hw-1.0.5\src\crc32c.cpp">
+      <Filter>$(WwmiRefDir)\crc32c-hw-1.0.5\src</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="reshade_addon\migoto\dx12_context.h">
+      <Filter>migoto</Filter>
+    </ClInclude>
+    <ClInclude Include="reshade_addon\migoto\dx12_bridge.h">
+      <Filter>migoto</Filter>
+    </ClInclude>
+    <ClInclude Include="reshade_addon\migoto\prof_core.h">
+      <Filter>migoto</Filter>
+    </ClInclude>
+    <ClInclude Include="reshade_addon\migoto\port_toggles.h">
+      <Filter>migoto</Filter>
+    </ClInclude>
+    <ClInclude Include="reshade_addon\migoto\dx12_device.h">
+      <Filter>migoto</Filter>
+    </ClInclude>
+    <ClInclude Include="reshade_addon\migoto\dx12_pipeline.h">
+      <Filter>migoto</Filter>
+    </ClInclude>
+    <ClInclude Include="reshade_addon\migoto\dx12_pipeline_internal.h">
+      <Filter>migoto</Filter>
+    </ClInclude>
+    <ClInclude Include="reshade_addon\migoto\dx12_wrap.h">
+      <Filter>migoto</Filter>
+    </ClInclude>
+    <ClInclude Include="reshade_addon\migoto\dx12_dump_readback.h">
+      <Filter>migoto</Filter>
+    </ClInclude>
+    <ClInclude Include="reshade_addon\migoto\dump_watchdog.h">
+      <Filter>migoto</Filter>
+    </ClInclude>
+    <ClInclude Include="reshade_addon\migoto\dump_preview.h">
+      <Filter>migoto</Filter>
+    </ClInclude>
+    <ClInclude Include="reshade_addon\migoto\dx12_input_layout.h">
+      <Filter>migoto</Filter>
+    </ClInclude>
+    <ClInclude Include="reshade_addon\migoto\port_api.h">
+      <Filter>migoto</Filter>
+    </ClInclude>
+    <ClInclude Include="reshade_addon\migoto\port_api_internal.h">
+      <Filter>migoto</Filter>
+    </ClInclude>
+    <ClInclude Include="reshade_addon\migoto\port_compat.h">
+      <Filter>migoto</Filter>
+    </ClInclude>
+    <ClInclude Include="reshade_addon\migoto\port_keygate.h">
+      <Filter>migoto</Filter>
+    </ClInclude>
+    <ClInclude Include="reshade_addon\migoto\frame_analysis_driver.h">
+      <Filter>migoto</Filter>
+    </ClInclude>
+    <ClInclude Include="reshade_addon\migoto\frame_analysis_engine.h">
+      <Filter>migoto</Filter>
+    </ClInclude>
+    <ClInclude Include="reshade_addon\migoto\frame_analysis_format.h">
+      <Filter>migoto</Filter>
+    </ClInclude>
+    <ClInclude Include="reshade_addon\migoto\HackerDevice.h">
+      <Filter>migoto</Filter>
+    </ClInclude>
+    <ClInclude Include="reshade_addon\migoto\HackerContext.h">
+      <Filter>migoto</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="reshade_addon\migoto\PRISTINE.txt">
+      <Filter>migoto</Filter>
+    </None>
+  </ItemGroup>
+</Project>

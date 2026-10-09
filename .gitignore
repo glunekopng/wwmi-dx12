@@ -1,0 +1,10 @@
+*.obj
+*.exp
+*.lib
+*.pdb
+*.ilk
+build_addon/
+shaders_cso/
+reshade_addon/build_stamp.h
+*.vcxproj.user
+.vs/

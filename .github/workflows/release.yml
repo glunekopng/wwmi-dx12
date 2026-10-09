@@ -1,0 +1,46 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Fetch the XXMI tags the engine version is read from
+        shell: pwsh
+        run: |
+          if ((git -C third_party/3Dmigoto rev-parse --is-shallow-repository) -eq 'true') {
+            git -C third_party/3Dmigoto fetch --tags --unshallow
+          } else {
+            git -C third_party/3Dmigoto fetch --tags
+          }
+
+      - name: Build and package
+        shell: pwsh
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $msbuild = & $vswhere -latest -requires Microsoft.Component.MSBuild -find 'MSBuild\**\Bin\amd64\MSBuild.exe' | Select-Object -First 1
+          & $msbuild package.proj -m -nologo
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wwmi-dx12
+          path: build_addon/release/*.zip
+
+      - name: Attach the zip to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create $env:GITHUB_REF_NAME (Get-Item build_addon/release/*.zip).FullName --title $env:GITHUB_REF_NAME --generate-notes

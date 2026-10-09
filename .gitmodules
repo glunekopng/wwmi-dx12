@@ -1,0 +1,6 @@
+[submodule "third_party/3Dmigoto"]
+	path = third_party/3Dmigoto
+	url = https://github.com/SpectrumQT/3Dmigoto
+[submodule "reshade_addon/sdk"]
+	path = reshade_addon/sdk
+	url = https://github.com/crosire/reshade

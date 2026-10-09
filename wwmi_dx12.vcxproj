@@ -1,0 +1,259 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>17.0</VCProjectVersion>
+    <ProjectGuid>{6B2A1C40-9F3D-4E51-8A77-0C11D2E45A02}</ProjectGuid>
+    <RootNamespace>wwmi_dx12</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <PropertyGroup>
+    <Configuration Condition="'$(Configuration)' == ''">Release</Configuration>
+    <Platform Condition="'$(Platform)' == ''">x64</Platform>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <PlatformToolset>$(DefaultPlatformToolset)</PlatformToolset>
+    <CharacterSet>NotSet</CharacterSet>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <WholeProgramOptimization>false</WholeProgramOptimization>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <Import Project="wwmi-dx12.props" />
+  <PropertyGroup>
+    <IntDir>$(WwmiRoot)build_addon\$(Configuration)\addon\</IntDir>
+    <TargetName>wwmi_dx12</TargetName>
+    <TargetExt>.addon64</TargetExt>
+    <LinkIncremental>false</LinkIncremental>
+    <WwmiDeployCfgArg Condition="'$(Configuration)' == 'Release'">-Release</WwmiDeployCfgArg>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <Optimization>MaxSpeed</Optimization>
+      <DebugInformationFormat>None</DebugInformationFormat>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <ExceptionHandling>Sync</ExceptionHandling>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <PreprocessorDefinitions>IMGUI_DISABLE_INCLUDE_IMCONFIG_H;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(WwmiRoot)reshade_addon;$(WwmiRoot)reshade_addon\sdk\include;$(WwmiRoot)src;$(WwmiRoot)reshade_addon\sdk\deps\imgui;$(WwmiPristineDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <GenerateDebugInformation>false</GenerateDebugInformation>
+      <GenerateMapFile>true</GenerateMapFile>
+      <MapFileName>$(OutDir)wwmi_dx12.map</MapFileName>
+      <AdditionalDependencies>user32.lib;gdi32.lib;ole32.lib;advapi32.lib;d3d12.lib;d3d11.lib;d3dcompiler.lib;dxgi.lib;xinput.lib;dbghelp.lib;shlwapi.lib;psapi.lib;$(WwmiRefDir)\pcre2\pcre2-8-64.lib;$(WwmiRefDir)\Nektra\NktHookLib64.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+    <PreLinkEvent>
+      <Command>if exist "$(OutDir)wwmi_dx12.map" move /y "$(OutDir)wwmi_dx12.map" "$(OutDir)wwmi_dx12.prev.map" &gt;nul
+if exist "$(OutDir)wwmi_dx12.pdb" move /y "$(OutDir)wwmi_dx12.pdb" "$(OutDir)wwmi_dx12.prev.pdb" &gt;nul
+exit /b 0</Command>
+    </PreLinkEvent>
+    <PostBuildEvent>
+      <Command Condition="'$(WwmiDeploy)' == 'true'">powershell -NoProfile -ExecutionPolicy Bypass -File "$(WwmiRoot)deploy.ps1" -TimeoutSec $(WwmiDeployTimeoutSec) $(WwmiDeployCfgArg)</Command>
+      <Message Condition="'$(WwmiDeploy)' == 'true'">Deploying to the game's Addons folder (waits up to $(WwmiDeployTimeoutSec)s if the game is running)...</Message>
+    </PostBuildEvent>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)' == 'Debug'">
+    <ClCompile>
+      <DebugInformationFormat>OldStyle</DebugInformationFormat>
+      <PreprocessorDefinitions>WWMI_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <Link>
+      <GenerateDebugInformation>DebugFull</GenerateDebugInformation>
+      <ProgramDatabaseFile>$(OutDir)wwmi_dx12.pdb</ProgramDatabaseFile>
+      <OptimizeReferences>true</OptimizeReferences>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup Label="Addon">
+    <ClCompile Include="reshade_addon\wwmi_addon.cpp" />
+    <ClCompile Include="reshade_addon\mods\layout_registry.cpp" />
+    <ClCompile Include="reshade_addon\mods\shader_alias.cpp" />
+    <ClCompile Include="reshade_addon\hooks\pipeline_hooks.cpp" />
+    <ClCompile Include="reshade_addon\hooks\cmd_bind_hooks.cpp" />
+    <ClCompile Include="reshade_addon\hooks\resource_tracker.cpp" />
+    <ClCompile Include="reshade_addon\rabbitfx\rabbitfx_bind.cpp" />
+    <ClCompile Include="reshade_addon\mods\port_section.cpp" />
+    <ClCompile Include="reshade_addon\dispatch\dispatch_hook.cpp" />
+    <ClCompile Include="reshade_addon\instrumentation\dispatch_diag.cpp" />
+    <ClCompile Include="reshade_addon\dispatch\dispatch_overrides.cpp" />
+    <ClCompile Include="reshade_addon\dispatch\skin_cache_learn.cpp" />
+    <ClCompile Include="reshade_addon\present\present_hook.cpp" />
+    <ClCompile Include="reshade_addon\instrumentation\present_diag.cpp" />
+    <ClCompile Include="reshade_addon\present\present_engine.cpp" />
+    <ClCompile Include="reshade_addon\present\presence_tick.cpp" />
+    <ClCompile Include="reshade_addon\present\present_mod_load.cpp" />
+    <ClCompile Include="reshade_addon\instrumentation\device_watch.cpp" />
+    <ClCompile Include="reshade_addon\draw\draw_hook.cpp" />
+    <ClCompile Include="reshade_addon\draw\draw_claim.cpp" />
+    <ClCompile Include="reshade_addon\instrumentation\draw_probes.cpp" />
+    <ClCompile Include="reshade_addon\draw\draw_shadow.cpp" />
+    <ClCompile Include="reshade_addon\draw\draw_texswap.cpp" />
+    <ClCompile Include="reshade_addon\draw\draw_inject.cpp" />
+    <ClCompile Include="reshade_addon\draw\draw_restore.cpp" />
+    <ClCompile Include="reshade_addon\draw\draw_comp.cpp" />
+    <ClCompile Include="reshade_addon\draw\draw_section_draw.cpp" />
+    <ClCompile Include="reshade_addon\draw\section_ps_stamp.cpp" />
+    <ClCompile Include="reshade_addon\mods\claim_state.cpp" />
+    <ClCompile Include="reshade_addon\instrumentation\stall_watchdog.cpp" />
+    <ClCompile Include="reshade_addon\instrumentation\removal_pin.cpp" />
+    <ClCompile Include="reshade_addon\hooks\dxil_psv.cpp" />
+    <ClCompile Include="reshade_addon\rabbitfx\rfx_dxil.cpp" />
+    <ClCompile Include="reshade_addon\textures\texture_module.cpp" />
+    <ClCompile Include="reshade_addon\rabbitfx\pso_blend.cpp" />
+    <ClCompile Include="reshade_addon\textures\tex_lod.cpp" />
+    <ClCompile Include="reshade_addon\textures\tex_eager.cpp" />
+    <ClCompile Include="reshade_addon\instrumentation\tex_timing.cpp" />
+    <ClCompile Include="reshade_addon\mods\skeleton.cpp" />
+    <ClCompile Include="reshade_addon\ui\overlay.cpp" />
+    <ClCompile Include="reshade_addon\mods\wwmi_runtime.cpp" />
+    <ClCompile Include="reshade_addon\mods\buffer_relocation.cpp" />
+    <ClCompile Include="reshade_addon\shapekeys\sk_identity.cpp" />
+    <ClCompile Include="reshade_addon\shapekeys\sk_resolve.cpp" />
+    <ClCompile Include="reshade_addon\shapekeys\sk_queue.cpp" />
+    <ClCompile Include="reshade_addon\shapekeys\sk_store.cpp" />
+    <ClCompile Include="reshade_addon\shapekeys\sk_replay.cpp" />
+    <ClCompile Include="reshade_addon\shapekeys\sk_submit_order.cpp" />
+    <ClCompile Include="reshade_addon\mods\wwmi_mod.cpp" />
+    <ClCompile Include="reshade_addon\mods\wwmi_mod_engine.cpp" />
+    <ClCompile Include="reshade_addon\mods\ib_hash.cpp" />
+    <ClCompile Include="reshade_addon\instrumentation\crash_handler.cpp" />
+  </ItemGroup>
+  <ItemGroup Label="RT stub" Condition="'$(WwmiRT)' == '0'">
+    <ClCompile Include="reshade_addon\rt\rt_stub.cpp" />
+  </ItemGroup>
+  <ItemGroup Label="Debug" Condition="'$(Configuration)' == 'Debug'">
+    <ClCompile Include="reshade_addon\instrumentation\chain_trace.cpp" />
+    <ClCompile Include="reshade_addon\instrumentation\diagnostics.cpp" />
+    <ClCompile Include="reshade_addon\instrumentation\dispatch_capture.cpp" />
+    <ClCompile Include="reshade_addon\instrumentation\draw_dump_publish.cpp" />
+    <ClCompile Include="reshade_addon\instrumentation\gpu_timer.cpp" />
+    <ClCompile Include="reshade_addon\instrumentation\hot_path.cpp" />
+    <ClCompile Include="reshade_addon\instrumentation\hot_path_gpu.cpp" />
+    <ClCompile Include="reshade_addon\instrumentation\morph_dump.cpp" />
+    <ClCompile Include="reshade_addon\instrumentation\occlusion_probe.cpp" />
+    <ClCompile Include="reshade_addon\instrumentation\profiler_mem.cpp" />
+    <ClCompile Include="reshade_addon\instrumentation\skeleton_dump.cpp" />
+    <ClCompile Include="reshade_addon\instrumentation\sk_ring.cpp" />
+  </ItemGroup>
+  <ItemGroup Label="Core">
+    <ClCompile Include="src\mod_loader.cpp" />
+    <ClCompile Include="src\dxil_cb.cpp" />
+    <ClCompile Include="src\gpu_progress.cpp" />
+    <ClCompile Include="src\log.cpp" />
+  </ItemGroup>
+  <ItemGroup Label="Headers">
+    <ClInclude Include="reshade_addon\addon_common.h" />
+    <ClInclude Include="reshade_addon\addon_core.h" />
+    <ClInclude Include="reshade_addon\addon_state.h" />
+    <ClInclude Include="reshade_addon\build_stamp.h" />
+    <ClInclude Include="reshade_addon\config.h" />
+    <ClInclude Include="reshade_addon\rt\rt_hooks.h" />
+    <ClInclude Include="src\buffer_view_fit.h" />
+    <ClInclude Include="src\d3d12_barrier.h" />
+    <ClInclude Include="src\d3d12_buffer.h" />
+    <ClInclude Include="src\dxgi_bc.h" />
+    <ClInclude Include="src\dxgi_format_info.h" />
+    <ClInclude Include="src\dxil_cb.h" />
+    <ClInclude Include="src\fnv.h" />
+    <ClInclude Include="src\gpu_progress.h" />
+    <ClInclude Include="src\gpu_queue.h" />
+    <ClInclude Include="src\log.h" />
+    <ClInclude Include="src\mod_loader.h" />
+    <ClInclude Include="reshade_addon\migoto\prof_core.h" />
+  </ItemGroup>
+  <ItemGroup Label="Build scripts">
+    <None Include="wwmi-dx12.props" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="migoto_engine.vcxproj">
+      <Project>{6B2A1C40-9F3D-4E51-8A77-0C11D2E45A01}</Project>
+    </ProjectReference>
+  </ItemGroup>
+  <ItemGroup Label="Shaders">
+    <WwmiShader Include="$(WwmiRoot)reshade_addon\shaders\BufCopy.hlsl" />
+    <WwmiShader Include="$(WwmiRoot)shaders_src\IbVbHash.hlsl" />
+  </ItemGroup>
+  <Target Name="WwmiShaders" BeforeTargets="ClCompile"
+          Inputs="@(WwmiShader);$(MSBuildProjectFullPath)"
+          Outputs="@(WwmiShader->'$(WwmiRoot)shaders_cso\%(Filename).cso')">
+    <MakeDir Directories="$(WwmiRoot)shaders_cso" />
+    <Exec Command="&quot;$(WindowsSdkDir)bin\$(TargetPlatformVersion)\x64\dxc.exe&quot; -nologo -T cs_6_0 -E main -O3 -Zpc -Fo &quot;$(WwmiRoot)shaders_cso\%(WwmiShader.Filename).cso&quot; &quot;%(WwmiShader.FullPath)&quot;" />
+  </Target>
+  <UsingTask TaskName="WwmiWriteBuildStamp" TaskFactory="RoslynCodeTaskFactory" AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll">
+    <ParameterGroup>
+      <Root ParameterType="System.String" Required="true" />
+    </ParameterGroup>
+    <Task>
+      <Using Namespace="System.Diagnostics" />
+      <Using Namespace="System.Security.Cryptography" />
+      <Code Type="Fragment" Language="cs"><![CDATA[
+string root = Root.TrimEnd('\\');
+Func<string, string> git = args =>
+{
+    try
+    {
+        var start = new ProcessStartInfo("git", "-C \"" + root + "\" " + args)
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+        };
+        using (var p = Process.Start(start))
+        {
+            string text = p.StandardOutput.ReadToEnd();
+            p.StandardError.ReadToEnd();
+            p.WaitForExit();
+            return p.ExitCode == 0 ? text.Trim() : "";
+        }
+    }
+    catch (Exception)
+    {
+        return "";
+    }
+};
+string sha = git("rev-parse --short HEAD");
+if (sha.Length == 0) sha = "unknown";
+string version = File.Exists(Path.Combine(root, "VERSION")) ? File.ReadAllText(Path.Combine(root, "VERSION")).Trim() : "dev";
+string dirty = git("status --porcelain --untracked-files=no").Length != 0 ? "+dirty" : "";
+string[] rfxFiles =
+{
+    @"reshade_addon\rabbitfx\rfx_dxil.cpp",
+    @"reshade_addon\rabbitfx\rfx_dxil.h",
+    @"reshade_addon\rfx_glow_ir.inc",
+    @"reshade_addon\rabbitfx\pso_blend.h",
+    @"reshade_addon\rabbitfx\pso_blend.cpp",
+};
+var rfxBytes = new MemoryStream();
+foreach (string f in rfxFiles)
+{
+    byte[] b = File.ReadAllBytes(Path.Combine(root, f));
+    rfxBytes.Write(b, 0, b.Length);
+}
+string rfxHash = BitConverter.ToString(SHA256.Create().ComputeHash(rfxBytes.ToArray()), 0, 4).Replace("-", "");
+string stamp = "// GENERATED by wwmi_dx12.vcxproj (WwmiBuildStamp) -- do not edit, not tracked.\r\n#pragma once\r\n" +
+               "#define WWMI_VERSION \"" + version + "\"\r\n#define WWMI_BUILD_SHA \"" + sha + dirty + "\"\r\n" +
+               "#define WWMI_RFX_SRC_HASH 0x" + rfxHash + "u\r\n";
+string output = Path.Combine(root, @"reshade_addon\build_stamp.h");
+if (!File.Exists(output) || File.ReadAllText(output) != stamp) File.WriteAllText(output, stamp, Encoding.ASCII);
+]]></Code>
+    </Task>
+  </UsingTask>
+  <Target Name="WwmiBuildStamp" BeforeTargets="ClCompile">
+    <WwmiWriteBuildStamp Root="$(WwmiRoot)" />
+  </Target>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

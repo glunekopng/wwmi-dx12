@@ -1,0 +1,229 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>17.0</VCProjectVersion>
+    <ProjectGuid>{6B2A1C40-9F3D-4E51-8A77-0C11D2E45A01}</ProjectGuid>
+    <RootNamespace>migoto_engine</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <Configuration Condition="'$(Configuration)' == ''">Release</Configuration>
+    <Platform Condition="'$(Platform)' == ''">x64</Platform>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>StaticLibrary</ConfigurationType>
+    <PlatformToolset>$(DefaultPlatformToolset)</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <WholeProgramOptimization>false</WholeProgramOptimization>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <Import Project="wwmi-dx12.props" />
+
+  <PropertyGroup>
+    <IntDir>$(WwmiRoot)build_addon\$(Configuration)\migoto\</IntDir>
+    <OutDir>$(WwmiRoot)build_addon\$(Configuration)\</OutDir>
+    <TargetName>migoto_engine</TargetName>
+  </PropertyGroup>
+
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <Optimization>MaxSpeed</Optimization>
+      <DebugInformationFormat>None</DebugInformationFormat>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <ConformanceMode>false</ConformanceMode>
+      <AdditionalOptions>/permissive %(AdditionalOptions)</AdditionalOptions>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <ExceptionHandling>Sync</ExceptionHandling>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <ForcedIncludeFiles>$(WwmiRoot)reshade_addon\migoto\port_compat.h</ForcedIncludeFiles>
+      <PreprocessorDefinitions>UNICODE;_UNICODE;_HAS_STD_BYTE=0;MIGOTO_DX=11;PCRE2_CODE_UNIT_WIDTH=8;PCRE2_STATIC;CRC32C_STATIC;_CRT_SECURE_CPP_OVERLOAD_STANDARD_NAMES=1;_CRT_SECURE_CPP_OVERLOAD_STANDARD_NAMES_COUNT=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(WwmiRoot)reshade_addon\migoto;$(WwmiPristineDir);$(WwmiRefDir);$(WwmiRefDir)\HLSLDecompiler;$(WwmiRefDir)\D3D_Shaders;$(WwmiRefDir)\DirectXTK\Inc;$(WwmiRefDir)\DirectXTK\Src;$(WwmiRefDir)\crc32c-hw-1.0.5\include;$(WwmiRefDir)\pcre2;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <Lib>
+      <OutputFile>$(OutDir)migoto_engine.lib</OutputFile>
+    </Lib>
+  </ItemDefinitionGroup>
+
+  <ItemDefinitionGroup Condition="'$(Configuration)' == 'Debug'">
+    <ClCompile>
+      <DebugInformationFormat>OldStyle</DebugInformationFormat>
+      <PreprocessorDefinitions>WWMI_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+  </ItemDefinitionGroup>
+
+  <Target Name="WwmiPristineSources" BeforeTargets="ClCompile">
+    <ReadLinesFromFile File="$(WwmiRoot)reshade_addon\migoto\PRISTINE.txt">
+      <Output TaskParameter="Lines" ItemName="WwmiPristineLine" />
+    </ReadLinesFromFile>
+    <Copy SkipUnchangedFiles="true" SourceFiles="$(WwmiRefDir)\%(WwmiPristineLine.Identity)" DestinationFolder="$(WwmiPristineDir)" Condition="!$([System.String]::Copy('%(WwmiPristineLine.Identity)').StartsWith('#'))" />
+    <Exec Command="git -C &quot;$(WwmiRefDir)&quot; describe --tags --match v[0-9]* --abbrev=0" ConsoleToMSBuild="true" StandardOutputImportance="low" StandardErrorImportance="low" IgnoreExitCode="true" IgnoreStandardErrorWarningFormat="true">
+      <Output TaskParameter="ConsoleOutput" PropertyName="WwmiRefTag" />
+    </Exec>
+    <PropertyGroup>
+      <WwmiRefTag>$(WwmiRefTag.Trim())</WwmiRefTag>
+      <WwmiRefTag Condition="$([System.Text.RegularExpressions.Regex]::IsMatch('$(WwmiRefTag)', '^v?\d+\.\d+\.\d+$'))">$(WwmiRefTag).0</WwmiRefTag>
+      <WwmiRefVersionOk>$([System.Text.RegularExpressions.Regex]::IsMatch('$(WwmiRefTag)', '^v?\d+\.\d+\.\d+\.\d+$'))</WwmiRefVersionOk>
+      <WwmiRefPattern>^v?(\d+)\.(\d+)\.(\d+)\.(\d+)$</WwmiRefPattern>
+    </PropertyGroup>
+    <WriteLinesToFile Condition="'$(WwmiRefVersionOk)' == 'True'" File="$(WwmiPristineDir)\version.generated.h" Overwrite="true" WriteOnlyWhenDifferent="true"
+      Lines="#define VERSION_MAJOR $([System.Text.RegularExpressions.Regex]::Replace('$(WwmiRefTag)', '$(WwmiRefPattern)', '$1'));#define VERSION_MINOR $([System.Text.RegularExpressions.Regex]::Replace('$(WwmiRefTag)', '$(WwmiRefPattern)', '$2'));#define VERSION_REVISION $([System.Text.RegularExpressions.Regex]::Replace('$(WwmiRefTag)', '$(WwmiRefPattern)', '$3'));#define VERSION_BUILD $([System.Text.RegularExpressions.Regex]::Replace('$(WwmiRefTag)', '$(WwmiRefPattern)', '$4'))" />
+    <WriteLinesToFile Condition="'$(WwmiRefVersionOk)' != 'True'" File="$(WwmiPristineDir)\version.generated.h" Overwrite="true" WriteOnlyWhenDifferent="true" Lines="// no version tag in the submodule: version.h falls back to 0.0.0.0" />
+  </Target>
+
+  <ItemGroup Label="Their engine, UNMODIFIED from the submodule, plus port_globals.cpp (ours) -- NEVER edit theirs to fix our bugs">
+    <ClCompile Include="$(WwmiPristineDir)\CommandList.cpp">
+      <DisableSpecificWarnings>4244;4715;4477;4002;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+      <PreprocessorDefinitions>_SILENCE_CXX17_CODECVT_HEADER_DEPRECATION_WARNING;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="reshade_addon\migoto\port_ini.cpp">
+      <DisableSpecificWarnings>4244;4715;4477;4002;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+      <PreprocessorDefinitions>_SILENCE_CXX17_CODECVT_HEADER_DEPRECATION_WARNING;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="reshade_addon\migoto\port_override.cpp">
+      <DisableSpecificWarnings>4244;4715;4477;4002;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+      <PreprocessorDefinitions>_SILENCE_CXX17_CODECVT_HEADER_DEPRECATION_WARNING;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="$(WwmiPristineDir)\ResourceHash.cpp">
+      <DisableSpecificWarnings>4244;4715;4477;4002;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+      <PreprocessorDefinitions>_SILENCE_CXX17_CODECVT_HEADER_DEPRECATION_WARNING;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="$(WwmiPristineDir)\profiling.cpp">
+      <DisableSpecificWarnings>4244;4715;4477;4002;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+      <PreprocessorDefinitions>_SILENCE_CXX17_CODECVT_HEADER_DEPRECATION_WARNING;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="$(WwmiPristineDir)\input.cpp">
+      <DisableSpecificWarnings>4244;4715;4477;4002;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+      <PreprocessorDefinitions>_SILENCE_CXX17_CODECVT_HEADER_DEPRECATION_WARNING;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="$(WwmiPristineDir)\util.cpp">
+      <DisableSpecificWarnings>4244;4715;4477;4002;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+      <PreprocessorDefinitions>_SILENCE_CXX17_CODECVT_HEADER_DEPRECATION_WARNING;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="$(WwmiPristineDir)\lock.cpp">
+      <DisableSpecificWarnings>4244;4715;4477;4002;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+      <PreprocessorDefinitions>_SILENCE_CXX17_CODECVT_HEADER_DEPRECATION_WARNING;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="$(WwmiPristineDir)\cursor.cpp">
+      <DisableSpecificWarnings>4244;4715;4477;4002;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+      <PreprocessorDefinitions>_SILENCE_CXX17_CODECVT_HEADER_DEPRECATION_WARNING;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="reshade_addon\migoto\port_globals.cpp" />
+  </ItemGroup>
+
+  <ItemGroup Label="Our DX11-to-DX12 transition layer -- ours to edit, except frame_analysis_engine and frame_analysis_format (THEIRS, ported verbatim)">
+    <ClCompile Include="reshade_addon\migoto\dx12_context.cpp" />
+    <ClCompile Include="reshade_addon\migoto\dx12_bridge.cpp" />
+    <ClCompile Include="reshade_addon\migoto\dx12_context_impl.cpp" />
+    <ClCompile Include="reshade_addon\migoto\dx12_device.cpp" />
+    <ClCompile Include="reshade_addon\migoto\dx12_device_impl.cpp" />
+    <ClCompile Include="reshade_addon\migoto\dx12_wrap.cpp" />
+    <ClCompile Include="reshade_addon\migoto\dx12_pipeline.cpp" />
+    <ClCompile Include="reshade_addon\migoto\dx12_skcap.cpp" />
+    <ClCompile Include="reshade_addon\migoto\port_api.cpp" />
+    <ClCompile Include="reshade_addon\migoto\hacker_context_shim.cpp" />
+    <ClCompile Include="reshade_addon\migoto\port_vars.cpp" />
+    <ClCompile Include="reshade_addon\migoto\port_publish.cpp" />
+    <ClCompile Include="reshade_addon\migoto\port_parse_index.cpp" />
+    <ClCompile Include="reshade_addon\migoto\port_dispatch.cpp" />
+    <ClCompile Include="reshade_addon\migoto\port_keygate.cpp" />
+    <ClCompile Include="reshade_addon\migoto\port_skel_copies.cpp" />
+    <ClCompile Include="reshade_addon\migoto\frame_analysis_format.cpp">
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="reshade_addon\migoto\frame_analysis_engine.cpp">
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="reshade_addon\migoto\dx12_dump_readback.cpp" />
+    <ClCompile Include="reshade_addon\migoto\dump_watchdog.cpp" />
+    <ClCompile Include="reshade_addon\migoto\dump_preview.cpp" />
+    <ClCompile Include="reshade_addon\migoto\dx12_input_layout.cpp" />
+    <ClCompile Include="reshade_addon\migoto\frame_analysis_driver.cpp" />
+  </ItemGroup>
+
+  <ItemGroup Label="Third party -- compiled WITHOUT the forced include and the migoto defines">
+    <ClCompile Include="$(WwmiRefDir)\DirectXTK\Src\DDSTextureLoader.cpp">
+      <ForcedIncludeFiles />
+      <PreprocessorDefinitions>UNICODE;_UNICODE;_HAS_STD_BYTE=0;CRC32C_STATIC;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(WwmiRefDir)\DirectXTK\Inc;$(WwmiRefDir)\DirectXTK\Src;$(WwmiRefDir)\crc32c-hw-1.0.5\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+      <ObjectFileName>$(IntDir)tp_DDSTextureLoader.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="$(WwmiRefDir)\DirectXTK\Src\WICTextureLoader.cpp">
+      <ForcedIncludeFiles />
+      <PreprocessorDefinitions>UNICODE;_UNICODE;_HAS_STD_BYTE=0;CRC32C_STATIC;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(WwmiRefDir)\DirectXTK\Inc;$(WwmiRefDir)\DirectXTK\Src;$(WwmiRefDir)\crc32c-hw-1.0.5\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+      <ObjectFileName>$(IntDir)tp_WICTextureLoader.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="$(WwmiRefDir)\DirectXTK\Src\ScreenGrab.cpp">
+      <ForcedIncludeFiles />
+      <PreprocessorDefinitions>UNICODE;_UNICODE;_HAS_STD_BYTE=0;CRC32C_STATIC;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(WwmiRefDir)\DirectXTK\Inc;$(WwmiRefDir)\DirectXTK\Src;$(WwmiRefDir)\crc32c-hw-1.0.5\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+      <ObjectFileName>$(IntDir)tp_ScreenGrab.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="$(WwmiRefDir)\crc32c-hw-1.0.5\src\crc32c.cpp">
+      <ForcedIncludeFiles />
+      <PreprocessorDefinitions>UNICODE;_UNICODE;_HAS_STD_BYTE=0;CRC32C_STATIC;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(WwmiRefDir)\DirectXTK\Inc;$(WwmiRefDir)\DirectXTK\Src;$(WwmiRefDir)\crc32c-hw-1.0.5\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+      <ObjectFileName>$(IntDir)tp_crc32c.obj</ObjectFileName>
+    </ClCompile>
+  </ItemGroup>
+
+  <ItemGroup Label="Headers -- listed so they are browsable and searchable in Solution Explorer">
+    <ClInclude Include="reshade_addon\migoto\dx12_context.h" />
+    <ClInclude Include="reshade_addon\migoto\dx12_bridge.h" />
+    <ClInclude Include="reshade_addon\migoto\prof_core.h" />
+    <ClInclude Include="reshade_addon\migoto\port_toggles.h" />
+    <ClInclude Include="reshade_addon\migoto\dx12_device.h" />
+    <ClInclude Include="reshade_addon\migoto\dx12_pipeline.h" />
+    <ClInclude Include="reshade_addon\migoto\dx12_pipeline_internal.h" />
+    <ClInclude Include="reshade_addon\migoto\dx12_wrap.h" />
+    <ClInclude Include="reshade_addon\migoto\dx12_dump_readback.h" />
+    <ClInclude Include="reshade_addon\migoto\dump_watchdog.h" />
+    <ClInclude Include="reshade_addon\migoto\dump_preview.h" />
+    <ClInclude Include="reshade_addon\migoto\dx12_input_layout.h" />
+    <ClInclude Include="reshade_addon\migoto\port_api.h" />
+    <ClInclude Include="reshade_addon\migoto\port_api_internal.h" />
+    <ClInclude Include="reshade_addon\migoto\port_compat.h" />
+    <ClInclude Include="reshade_addon\migoto\port_keygate.h" />
+    <ClInclude Include="reshade_addon\migoto\frame_analysis_driver.h" />
+    <ClInclude Include="reshade_addon\migoto\frame_analysis_engine.h" />
+    <ClInclude Include="reshade_addon\migoto\frame_analysis_format.h" />
+    <ClInclude Include="reshade_addon\migoto\HackerDevice.h" />
+    <ClInclude Include="reshade_addon\migoto\HackerContext.h" />
+  </ItemGroup>
+
+  <ItemGroup Label="Not compiled -- kept visible so the build's real contents are not a guess">
+    <None Include="reshade_addon\migoto\PRISTINE.txt" />
+  </ItemGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

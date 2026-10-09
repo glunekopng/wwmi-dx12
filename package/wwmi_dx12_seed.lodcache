@@ -1,0 +1,269 @@
+; wwmi-dx12 LOD texture matches. One line per target:  <target> = <low> <flags> | <low> <flags> ...
+; A low is a lower-resolution texture the game streams in; it is swapped as its target's mod texture.
+;   mip=K         the low is the target's mip K (0: the level is not known)
+;   exact=1       proven from the game's own data: the target's own mip, or a stream copy
+;   exact=0       only looks alike, dropped once a low is proven to be that mip of the target: used with
+;                 lod_resemblance=1, and only in draws of a mod that declares the target
+;   chain=1       learned through a chain of stream copies; a look-alike learned so has the rmse of the one it came through
+;   rmse=R        a look-alike's difference from identical, 0-255 per texel (none: never measured); it needs R <= 8 and correlation >= 0.97
+; degenerate = <low> <low> ...  identical to the mips of more than one target: never swapped, never learned again
+00ad3de9 = 15e595fd mip=3 exact=1 chain=0 | 87c9e488 mip=2 exact=1 chain=0 | f3db3fa2 mip=1 exact=1 chain=0
+050ed77f = d52be38c mip=1 exact=1 chain=0
+08d3e652 = 26d9845d mip=3 exact=1 chain=0 | 29e02dab mip=1 exact=1 chain=0 | 321cefe7 mip=2 exact=1 chain=0
+0952404d = 0c9909b8 mip=2 exact=1 chain=0 | 24536de9 mip=1 exact=1 chain=0 | 68f7a1f0 mip=1 exact=1 chain=0
+0a4b1b48 = 462aedeb mip=0 exact=1 chain=1
+0b5b50ae = 1fbb1175 mip=2 exact=1 chain=0 | 38f4a719 mip=1 exact=1 chain=0 | e56dad2b mip=1 exact=1 chain=1
+0bb1e433 = 06b80079 mip=2 exact=1 chain=0 | 15ee8da5 mip=3 exact=0 chain=0 rmse=6.95 | 24ff0077 mip=1 exact=1 chain=1 | 3a8b16f7 mip=3 exact=0 chain=0 rmse=7.16 | 42b40723 mip=3 exact=0 chain=0 rmse=6.90 | 45ee91ab mip=3 exact=0 chain=0 rmse=7.23 | 59a73636 mip=3 exact=0 chain=0 rmse=6.90 | 5ff457cf mip=3 exact=0 chain=0 rmse=6.85 | 8f1b9ef0 mip=2 exact=1 chain=1 | dd48de08 mip=3 exact=0 chain=0 rmse=7.69
+0bfd71fc = 138ab1d0 mip=1 exact=1 chain=0 | 20df3e93 mip=3 exact=1 chain=0 | d4d72003 mip=1 exact=1 chain=1 | eeff3dc2 mip=2 exact=1 chain=0
+0d3ee66e = 7dfaa6d0 mip=3 exact=1 chain=0 | 8e14be18 mip=1 exact=1 chain=1 | b32b6637 mip=2 exact=1 chain=0
+0d73b1ea = d2162f65 mip=1 exact=1 chain=1
+0e0a5c3a = 1a2d12ae mip=1 exact=1 chain=0
+120ce215 = 245012b8 mip=1 exact=1 chain=0 | 6df67e9f mip=2 exact=1 chain=0
+13a68ee2 = 359dac8f mip=1 exact=1 chain=1
+141dbc74 = 4d140798 mip=2 exact=1 chain=0 | a5736e07 mip=1 exact=1 chain=1 | b239bf45 mip=1 exact=1 chain=0
+144d8d73 = 90b66a83 mip=0 exact=1 chain=1 | 959b38e0 mip=1 exact=1 chain=0 | efc5d984 mip=2 exact=1 chain=0
+147a09dd = 9d46ae21 mip=1 exact=1 chain=0 | abfd7838 mip=2 exact=1 chain=0 | efc37c05 mip=0 exact=1 chain=1
+1571587a = 0af03518 mip=1 exact=1 chain=0 | 35df5f3e mip=3 exact=1 chain=0 | 5b40a793 mip=2 exact=1 chain=0
+164df2d5 = 5480b941 mip=2 exact=1 chain=0 | 562f278b mip=1 exact=1 chain=1 | b198fafe mip=1 exact=1 chain=0
+165f3a1b = 1170e1c7 mip=1 exact=1 chain=0 | 58e39eda mip=1 exact=1 chain=0 | ef110c05 mip=1 exact=1 chain=0
+190d9e78 = 600f809f mip=3 exact=1 chain=0 | 955321b5 mip=2 exact=1 chain=0 | b00ffd73 mip=1 exact=1 chain=1
+1944212c = 17ef3454 mip=3 exact=1 chain=0 | 9a3974b6 mip=2 exact=1 chain=0 | c5673dfc mip=1 exact=1 chain=0
+1b751255 = 0956b5a7 mip=1 exact=1 chain=0 | 4f0c12cc mip=2 exact=1 chain=0 | c1ff7f39 mip=0 exact=1 chain=1
+1c8c931e = c004db60 mip=1 exact=1 chain=0
+1cf10f04 = 827f36d2 mip=1 exact=1 chain=1 | ec9f5926 mip=3 exact=1 chain=1 | f204c527 mip=2 exact=1 chain=1
+2069415f = 06562dfa mip=2 exact=1 chain=0 | 1d779b79 mip=1 exact=1 chain=0 | fa683f4b mip=1 exact=1 chain=1
+21c818e8 = bb346083 mip=1 exact=1 chain=0 | d341f255 mip=2 exact=1 chain=0 | dd819601 mip=3 exact=1 chain=0
+226b31fc = d50fc3e8 mip=1 exact=1 chain=0
+22932116 = 0c80e5aa mip=3 exact=1 chain=0 | 1fd24d90 mip=1 exact=1 chain=0 | eaeb3da8 mip=2 exact=1 chain=0
+22f7e214 = 4c498150 mip=1 exact=1 chain=1 | 65d863d0 mip=2 exact=1 chain=1 | 9b9e455e mip=3 exact=1 chain=1
+2375c88b = 52ce85ba mip=1 exact=0 chain=0 rmse=2.10
+239a5f3d = f7a2d8f6 mip=1 exact=0 chain=0 rmse=5.12
+239cabd0 = 9aa7ed8e mip=2 exact=1 chain=0 | c7ea5729 mip=1 exact=1 chain=1 | ce0afc8b mip=1 exact=1 chain=0
+243acfa0 = 5c7b83ef mip=2 exact=1 chain=0 | c91ddc80 mip=0 exact=1 chain=1 | fe24af12 mip=1 exact=1 chain=0
+24d13e57 = 44aa0f3e mip=1 exact=1 chain=0
+259644f5 = 177ee433 mip=2 exact=1 chain=0 | 20519ff5 mip=1 exact=1 chain=1 | 240d819d mip=1 exact=1 chain=0
+259b7976 = 04947e27 mip=1 exact=1 chain=0 | 61a9da09 mip=1 exact=1 chain=0 | fba25edc mip=1 exact=1 chain=0
+262dd8c5 = 573a9080 mip=3 exact=1 chain=0 | b399a4b3 mip=1 exact=1 chain=0 | fc3ad0a1 mip=2 exact=1 chain=0
+26d8f229 = 8f310a24 mip=1 exact=1 chain=0 | 9cea2162 mip=2 exact=1 chain=0
+275b841b = 70592500 mip=1 exact=1 chain=0 | b5a77da5 mip=2 exact=1 chain=0
+276a2bc6 = 501d1815 mip=1 exact=1 chain=1 | 8208327a mip=3 exact=1 chain=0 | c3ce15ba mip=2 exact=1 chain=0
+2af7486b = 26d60fea mip=1 exact=1 chain=0
+2b6f8bcb = 1ddc3ca8 mip=1 exact=1 chain=0 | 9e5839a0 mip=1 exact=1 chain=0 | c91dae78 mip=1 exact=1 chain=0
+2dc9e723 = 12082cdd mip=1 exact=1 chain=0 | 1b2da982 mip=3 exact=1 chain=0 | c4018fbb mip=2 exact=1 chain=0
+2dd3d65d = 3342d1a5 mip=2 exact=1 chain=1 | ba8a9642 mip=2 exact=1 chain=0 | d3992a2a mip=1 exact=1 chain=1
+323acfe7 = 900273f9 mip=1 exact=1 chain=1
+336ca740 = 47bce481 mip=1 exact=1 chain=1 | e2d03b94 mip=1 exact=1 chain=0
+34525bd1 = b5400a21 mip=1 exact=1 chain=0 | cd9098c9 mip=2 exact=1 chain=0 | fb1686a2 mip=1 exact=1 chain=1
+34897ad2 = 2b311f69 mip=1 exact=1 chain=0
+34a83aaf = 877f231c mip=1 exact=1 chain=0 | cb560dda mip=1 exact=1 chain=0
+37975225 = ac3900d0 mip=1 exact=1 chain=1 | b11598db mip=1 exact=1 chain=0
+3845f69e = 587cc4eb mip=2 exact=1 chain=0 | 9c88a8f9 mip=1 exact=1 chain=0 | f43fd2c9 mip=1 exact=1 chain=0
+388a3c12 = 116928ab mip=1 exact=1 chain=0 | 7fb0aff0 mip=1 exact=1 chain=1 | 94fecb02 mip=2 exact=1 chain=0
+3a965001 = 0d69ee70 mip=2 exact=1 chain=0 | 4efa4faa mip=1 exact=1 chain=0 | dad72a30 mip=3 exact=1 chain=0
+3ce06c9a = 7a909b49 mip=1 exact=1 chain=0 | ab4a6311 mip=2 exact=1 chain=0 | dac2e5bb mip=3 exact=1 chain=0
+3d40779b = 36bb9ba2 mip=0 exact=1 chain=1 | a1ca6332 mip=2 exact=1 chain=0 | cd58595f mip=1 exact=1 chain=0
+4089b1fa = 142c9cb6 mip=3 exact=1 chain=0 | aa8ccbfc mip=2 exact=1 chain=0 | ff1749ae mip=1 exact=1 chain=1
+42a9c39a = 1a44ca80 mip=2 exact=1 chain=0 | 85bd2951 mip=1 exact=1 chain=0 | 9f8d5a93 mip=0 exact=1 chain=1
+4314173b = b02f960f mip=1 exact=1 chain=1
+44f6cee1 = 30205e0f mip=1 exact=1 chain=0 | 5496d3cd mip=2 exact=1 chain=0 | c71e95ce mip=3 exact=1 chain=0
+45094b52 = 2abd8030 mip=2 exact=1 chain=0 | a48c3b1e mip=1 exact=1 chain=0
+45359ef8 = 85d17ac3 mip=1 exact=1 chain=0 | c26d93bf mip=1 exact=1 chain=0
+466cbfd6 = 34c26e3d mip=0 exact=1 chain=1 | 7a480429 mip=1 exact=1 chain=0 | ee514925 mip=2 exact=1 chain=1
+475e2ef0 = 18f21d39 mip=2 exact=1 chain=0 | 8910b5bb mip=0 exact=1 chain=1 | cd4cc30c mip=1 exact=1 chain=0
+47708382 = 47038124 mip=2 exact=1 chain=0 | aa17ec66 mip=1 exact=1 chain=1
+47ae7506 = aaf63722 mip=2 exact=1 chain=0 | fec3b553 mip=1 exact=1 chain=0
+48128d83 = 071f749c mip=1 exact=1 chain=0 | 10c722c8 mip=3 exact=1 chain=0 | b5c31fee mip=2 exact=1 chain=0
+491e2b90 = 7c2afbf1 mip=1 exact=1 chain=0 | fb46d9e7 mip=1 exact=1 chain=1
+4a267043 = 523afdaa mip=1 exact=1 chain=0 | 851db37b mip=3 exact=1 chain=0 | 8dc2a110 mip=2 exact=1 chain=0
+4a718845 = 4f5c2bf7 mip=1 exact=1 chain=0 | f2b88821 mip=2 exact=1 chain=0
+4ae46568 = 9b555579 mip=1 exact=1 chain=0 | a45b3826 mip=2 exact=1 chain=0
+4aeb1899 = 8e5d094f mip=1 exact=1 chain=0 | b31a0f08 mip=2 exact=1 chain=0 | bd873f8a mip=3 exact=1 chain=0
+4b120eaa = 8b326a74 mip=1 exact=1 chain=1
+4bee4070 = 6b29c20e mip=1 exact=1 chain=0
+4bf1b50c = 9b507aa6 mip=2 exact=1 chain=0 | b60e4156 mip=1 exact=1 chain=0 | e3dbb28c mip=3 exact=1 chain=0
+4db471ed = 367fcaa4 mip=2 exact=1 chain=0 | e129ca36 mip=1 exact=1 chain=0
+4ea9b46d = babe8a04 mip=1 exact=1 chain=1 | d212b7b4 mip=2 exact=1 chain=0 | f9f40339 mip=3 exact=1 chain=0
+4f1aa63c = 61272998 mip=1 exact=1 chain=0 | d57661bb mip=3 exact=1 chain=0 | e217ad62 mip=2 exact=1 chain=0
+500f741f = d76583bc mip=1 exact=1 chain=0
+50522981 = 14b9d706 mip=2 exact=1 chain=0 | 1ffa183d mip=3 exact=1 chain=0 | f225423f mip=1 exact=1 chain=0
+506f0b79 = 1d7ad91f mip=0 exact=1 chain=1
+51788135 = 01938661 mip=3 exact=1 chain=0 | 1bea3d0d mip=1 exact=1 chain=0 | 28f2e2b5 mip=2 exact=1 chain=0
+51ac5e38 = b73dab16 mip=1 exact=1 chain=0 | c4e4976d mip=2 exact=1 chain=0 | dd4622eb mip=1 exact=1 chain=1
+526b9ed0 = 99b5b37b mip=1 exact=1 chain=0 | a659e9a7 mip=1 exact=1 chain=0 | bacb2d38 mip=1 exact=1 chain=0
+5315f443 = 1b9f743b mip=1 exact=1 chain=1 | 891efecb mip=3 exact=1 chain=1 | a60c5c6e mip=2 exact=1 chain=1
+58d2165a = 3ed666e3 mip=3 exact=1 chain=0 | 706ce698 mip=1 exact=1 chain=0 | c7c9495d mip=2 exact=1 chain=0
+590c6192 = abf8e08f mip=1 exact=1 chain=0 | b8957d57 mip=1 exact=1 chain=0 | be4575b2 mip=1 exact=1 chain=0
+59276c52 = 04db8cf7 mip=2 exact=1 chain=0 | 9b65bc5b mip=1 exact=1 chain=0 | f4e45544 mip=3 exact=1 chain=0
+5a007e02 = a5cb9321 mip=1 exact=1 chain=1
+5a3ba440 = 59831beb mip=1 exact=1 chain=0
+5a594240 = 2e29cb2e mip=1 exact=1 chain=0 | d689e567 mip=2 exact=1 chain=0
+5ae7d0a0 = abd0286d mip=1 exact=1 chain=0
+5b48c9c5 = 283e4020 mip=2 exact=1 chain=0 | 7b72d034 mip=1 exact=1 chain=0
+5ce12096 = 7554af72 mip=0 exact=0 chain=1 | db9044ac mip=1 exact=1 chain=1
+5dc453d0 = 8061c5f3 mip=1 exact=1 chain=0 | bd1dbd5a mip=2 exact=1 chain=0
+5e804060 = 5d07dc8f mip=1 exact=1 chain=0 | 84da095c mip=3 exact=1 chain=0 | b28054bb mip=1 exact=1 chain=0
+5e96c027 = a45422cd mip=1 exact=1 chain=0 | ecf9ba97 mip=1 exact=1 chain=0 | ef7b2caf mip=2 exact=1 chain=0
+6189a189 = 3014a984 mip=2 exact=1 chain=0 | 3c8687c3 mip=3 exact=1 chain=0 | 3e3bc6a6 mip=1 exact=1 chain=0
+61d64305 = 30d78e31 mip=1 exact=1 chain=1 | 4d9204b8 mip=2 exact=1 chain=0 | 589f7588 mip=3 exact=1 chain=0
+63e009b9 = 38229d2f mip=1 exact=1 chain=0 | 6435fa36 mip=1 exact=1 chain=1 | 729b4cdc mip=2 exact=1 chain=0
+63ec1998 = 529db395 mip=1 exact=1 chain=0 | e7aa4140 mip=1 exact=1 chain=0
+64e35930 = b610008b mip=1 exact=1 chain=0 | da1dffd2 mip=2 exact=1 chain=0 | e3a8d74c mip=1 exact=1 chain=0
+66d1e065 = 3420b46d mip=3 exact=1 chain=1 | 6f89b0c0 mip=2 exact=1 chain=1 | e78c6537 mip=1 exact=1 chain=1
+6841a69c = 05eeb538 mip=1 exact=1 chain=0 | 2ab4c2b7 mip=1 exact=1 chain=0 | d1b06726 mip=1 exact=1 chain=0
+6981dea4 = 27e78a8a mip=2 exact=1 chain=0 | 97f99c33 mip=3 exact=1 chain=0 | 9dc36cc6 mip=1 exact=1 chain=0
+69cca045 = 05ef3f7f mip=2 exact=1 chain=0 | 918862db mip=1 exact=1 chain=1 | b938fef2 mip=2 exact=1 chain=0
+69eee297 = 4fc8285e mip=1 exact=1 chain=0 | fd84b3ac mip=2 exact=1 chain=0
+6ae8dd10 = b2519abe mip=1 exact=1 chain=0
+6b304165 = c38cf6f5 mip=0 exact=1 chain=1
+6cae605b = 35252013 mip=3 exact=1 chain=0 | d0ada456 mip=2 exact=1 chain=0 | d3fd800f mip=1 exact=1 chain=1
+6ff3ee98 = 21c4c648 mip=3 exact=1 chain=0 | 63608767 mip=2 exact=1 chain=0 | e0145949 mip=1 exact=1 chain=0
+701f7bac = 4e32c219 mip=1 exact=1 chain=1 | 84ed188a mip=2 exact=1 chain=1 | 91d13b7d mip=2 exact=1 chain=0
+7078e9ad = b82073f0 mip=2 exact=1 chain=0 | cbb4c9b3 mip=1 exact=1 chain=0
+71994cc3 = 3365b492 mip=0 exact=1 chain=1 | 9bbb58b6 mip=2 exact=1 chain=0 | ed704c5d mip=1 exact=1 chain=0
+73f1de8a = 072842e1 mip=1 exact=1 chain=1 | 8150bf2b mip=2 exact=1 chain=0 | b847e2bf mip=2 exact=1 chain=1
+742c5c7b = a8c86fb3 mip=1 exact=1 chain=0 | d6fe5015 mip=1 exact=1 chain=0
+75b0fdd6 = 7a8daf66 mip=1 exact=1 chain=0 | 928d1991 mip=3 exact=1 chain=0 | ad8d8bb5 mip=2 exact=1 chain=0
+76b6fe88 = 12d2245a mip=1 exact=1 chain=1 | 5edb48dd mip=3 exact=1 chain=0 | f2df03f7 mip=2 exact=1 chain=0
+778ee915 = a1bdf2b8 mip=0 exact=1 chain=1
+77bceda6 = 31ecac16 mip=2 exact=1 chain=0 | 416b3c2f mip=1 exact=1 chain=0 | 80a71de3 mip=3 exact=1 chain=0
+79fe16cd = cb1f354d mip=1 exact=1 chain=0
+7d54a0d5 = 02e13b14 mip=2 exact=1 chain=0 | 03fccdfa mip=1 exact=1 chain=0 | 14e5a8a5 mip=3 exact=1 chain=0
+7de7b837 = 10367483 mip=1 exact=1 chain=1 | 6c3bdef6 mip=1 exact=1 chain=0 | eab38381 mip=2 exact=1 chain=0
+7e1916af = 175a6c19 mip=2 exact=1 chain=0 | dc3c3b4a mip=1 exact=1 chain=0
+7e5b9732 = 5709f0ba mip=2 exact=1 chain=0 | 94dffe2e mip=1 exact=1 chain=1 | fe0b4eff mip=1 exact=1 chain=0
+7ea35de6 = 7d12a758 mip=1 exact=1 chain=0 | d5ad0a9d mip=1 exact=1 chain=0
+7ead6dd3 = 04e2bc99 mip=1 exact=1 chain=1 | 726e1d85 mip=2 exact=1 chain=0 | 9689c7b6 mip=3 exact=1 chain=0
+7ed83a67 = 9c7c61da mip=1 exact=1 chain=0
+803af004 = e63c1880 mip=1 exact=1 chain=1
+80ee93bc = 3d3e8ce0 mip=1 exact=1 chain=1 | e2193982 mip=2 exact=1 chain=0
+8224e584 = 26f883b2 mip=0 exact=1 chain=1 | 4cb1efe6 mip=1 exact=1 chain=0 | 77bbf3ac mip=2 exact=1 chain=0
+830a0f80 = 378851e3 mip=2 exact=1 chain=0 | 3f45882d mip=1 exact=1 chain=0 | 66c17f4b mip=0 exact=1 chain=1
+8473f396 = 1a1c0f92 mip=1 exact=1 chain=0 | 4b83d77f mip=1 exact=1 chain=0
+84cd66ac = 2e69f34b mip=1 exact=1 chain=0 | ce1d8a22 mip=2 exact=1 chain=0 | e4f5e763 mip=3 exact=1 chain=0
+8702c624 = 78cc5c56 mip=1 exact=1 chain=1
+88cf890d = 047678e5 mip=2 exact=1 chain=1 | 1f546b8b mip=3 exact=1 chain=1 | b19fedb7 mip=1 exact=1 chain=1
+89a5a60b = 1110df65 mip=1 exact=1 chain=1 | 1dfde739 mip=2 exact=1 chain=0
+8cf0eb6f = e400da4d mip=1 exact=1 chain=1
+8d8851ff = 51822679 mip=1 exact=1 chain=0 | 9fb733d7 mip=2 exact=1 chain=0 | ad702dd1 mip=3 exact=1 chain=0
+8e0a2541 = 7d62c79a mip=3 exact=1 chain=0 | d1296afa mip=1 exact=1 chain=1 | dfeee92b mip=2 exact=1 chain=0
+8fcd5788 = 037ef934 mip=3 exact=1 chain=0 | 61808827 mip=2 exact=1 chain=0 | fedbbe40 mip=1 exact=1 chain=1
+90196068 = 935a1248 mip=1 exact=1 chain=0 | a92d4ee8 mip=1 exact=1 chain=0
+93279721 = 4cd8be6a mip=1 exact=1 chain=1 | 790821f5 mip=1 exact=1 chain=1 | aecdf559 mip=1 exact=1 chain=1
+93b1592b = 1c15545b mip=0 exact=0 chain=1 | e225f2c4 mip=1 exact=1 chain=1
+96872630 = 03260d23 mip=2 exact=1 chain=0 | d9ff17d4 mip=1 exact=1 chain=0 | f3cbf557 mip=0 exact=1 chain=1
+96902086 = 15c88578 mip=2 exact=1 chain=0 | 2327df4b mip=1 exact=1 chain=0
+970c252e = 68757c93 mip=2 exact=1 chain=1 | a16c5306 mip=1 exact=1 chain=0
+971e6193 = 71dfa4aa mip=2 exact=1 chain=0 | d96f3393 mip=1 exact=1 chain=0
+99f424b5 = 0617ae0b mip=2 exact=1 chain=0 | 24077cd7 mip=1 exact=1 chain=0 | e8b2bdad mip=0 exact=1 chain=1
+9a9b6927 = 09e13ca2 mip=1 exact=1 chain=1 | 2544b226 mip=2 exact=1 chain=0 | 9153fd71 mip=1 exact=1 chain=0
+9d100d36 = 11569f15 mip=0 exact=1 chain=1 | ba140ee4 mip=2 exact=1 chain=0 | c1eaf400 mip=1 exact=1 chain=0
+9dd0b17b = 50790891 mip=1 exact=1 chain=0 | 839e3661 mip=1 exact=1 chain=0
+a03037e3 = c9e0a055 mip=1 exact=1 chain=0
+a220a997 = a4f80f4e mip=3 exact=1 chain=0 | d99e988a mip=2 exact=1 chain=0 | fcfc3cb2 mip=1 exact=1 chain=0
+a274d627 = c5c4048f mip=1 exact=1 chain=0
+a2b39668 = 3cac1ec4 mip=1 exact=1 chain=1 | 6daad32d mip=3 exact=1 chain=0 | 74823a89 mip=2 exact=1 chain=0
+a37179ff = 3a164dde mip=2 exact=1 chain=0 | dcd87dce mip=1 exact=1 chain=0 | ff58eb88 mip=1 exact=1 chain=0
+a3be2602 = 14b4d5ee mip=1 exact=1 chain=0 | 73aea7e6 mip=1 exact=1 chain=0 | bd883b22 mip=1 exact=1 chain=1
+a506a70d = da66e597 mip=1 exact=1 chain=0
+a576ce3e = 23a48f0b mip=2 exact=1 chain=0 | 517f283e mip=3 exact=1 chain=0 | 7e6c8d99 mip=1 exact=1 chain=0
+a76caeb5 = 21f12063 mip=2 exact=1 chain=0 | 292a9cd3 mip=3 exact=1 chain=0 | 5015b951 mip=1 exact=1 chain=0
+a7ab2f73 = ca279281 mip=0 exact=1 chain=1
+a8f40af2 = 16960e8b mip=1 exact=1 chain=0 | a0b82702 mip=1 exact=1 chain=1 | d141b5fb mip=2 exact=1 chain=0
+a9b25e96 = 1848bd68 mip=1 exact=1 chain=1 | b2ec1b47 mip=3 exact=1 chain=1 | f4d941a8 mip=2 exact=1 chain=1
+a9c4f230 = b02c8f87 mip=1 exact=1 chain=0 | d0941057 mip=3 exact=1 chain=0 | f5f2a22d mip=2 exact=1 chain=0
+aa69d267 = 6d54adc1 mip=1 exact=1 chain=0
+ab9067bf = 41c19981 mip=1 exact=1 chain=0 | 6c89276c mip=2 exact=1 chain=0
+abd78989 = 55c1d223 mip=2 exact=1 chain=0 | 6122f338 mip=1 exact=1 chain=0 | f0a54278 mip=0 exact=1 chain=1
+abe03def = 0e619177 mip=1 exact=1 chain=1 | 5fbfe0da mip=1 exact=1 chain=0 | bf1df73f mip=2 exact=1 chain=0
+ad78bb96 = 0ba56ddf mip=1 exact=1 chain=1 | 83c2ee06 mip=2 exact=1 chain=1 | cf5d0a93 mip=2 exact=1 chain=0
+af2d362b = 3e6b74bb mip=3 exact=1 chain=0 | 7040d092 mip=1 exact=1 chain=0 | e8f54a99 mip=2 exact=1 chain=0
+af6c88fe = d911f4b4 mip=1 exact=1 chain=0 | e087402b mip=2 exact=1 chain=0
+b0bedb6b = 925cecde mip=1 exact=1 chain=1
+b1245e44 = 71c6590f mip=3 exact=1 chain=0 | a41767fb mip=2 exact=1 chain=0 | f713fa8b mip=1 exact=1 chain=1
+b210a21c = 2e5797d6 mip=2 exact=1 chain=0 | 7d6f6969 mip=1 exact=1 chain=0 | ed4ba5dd mip=1 exact=1 chain=1
+b22bec61 = 1723f8f3 mip=1 exact=1 chain=0 | 6911226c mip=3 exact=1 chain=0 | 7097ed31 mip=2 exact=1 chain=0
+b2f4580e = 3182804d mip=1 exact=1 chain=0 | a34e4ad5 mip=1 exact=1 chain=0 | eb50257c mip=2 exact=1 chain=0
+b416f91f = 0af7bf8c mip=2 exact=1 chain=0 | 366d658e mip=1 exact=1 chain=0 | 8b6d29ae mip=1 exact=1 chain=0
+b44a91b1 = d17d3294 mip=1 exact=1 chain=0
+b46d93eb = 5b7e420e mip=2 exact=1 chain=0 | e96c9808 mip=1 exact=1 chain=0 | eee321de mip=3 exact=1 chain=0
+b499688d = 0718f108 mip=1 exact=1 chain=1
+b58c000f = 25ba7513 mip=1 exact=0 chain=0 rmse=5.78 | 3c6c3ab4 mip=1 exact=0 chain=0 rmse=3.43 | 81790070 mip=1 exact=0 chain=0 rmse=2.76 | c6c64c1c mip=1 exact=0 chain=0 rmse=1.70 | ce711a61 mip=0 exact=1 chain=1
+b76a23ec = 187648b8 mip=1 exact=1 chain=0 | 528cf2c1 mip=1 exact=1 chain=0 | 5b31a82f mip=0 exact=1 chain=1
+b8fb5c47 = 2c580904 mip=1 exact=1 chain=1
+b927a6bc = 16521459 mip=0 exact=0 chain=1 | 42b40723 mip=3 exact=0 chain=0 rmse=7.93 | 59a73636 mip=3 exact=0 chain=0 rmse=7.94 | 5ff457cf mip=3 exact=0 chain=0 rmse=7.86 | 686a099e mip=0 exact=1 chain=1 | b07dc033 mip=1 exact=1 chain=0 | c11990ec mip=2 exact=1 chain=0 | ed3b6442 mip=3 exact=0 chain=0 rmse=7.87
+ba2d3319 = bfd61c09 mip=1 exact=1 chain=0
+beffc90b = 64b72830 mip=1 exact=1 chain=1
+bf997bb0 = 0507b37e mip=1 exact=1 chain=0 | a81be3f9 mip=2 exact=1 chain=0 | bb2c48e2 mip=1 exact=1 chain=1
+bfb312fa = ea3abc78 mip=1 exact=0 chain=0 rmse=7.56
+c045cf76 = 4d2a2e6b mip=3 exact=1 chain=0 | b4b164e0 mip=2 exact=1 chain=0 | c33d1139 mip=1 exact=1 chain=0
+c0c34a21 = 35edac1d mip=3 exact=1 chain=0 | 8f8d9448 mip=2 exact=1 chain=0 | b59a10c8 mip=1 exact=1 chain=0
+c154eedc = 0daa2e82 mip=3 exact=1 chain=0 | 9019140d mip=2 exact=1 chain=0 | c90fd734 mip=1 exact=1 chain=0
+c1d892eb = 0e05615c mip=1 exact=1 chain=0
+c3e86a78 = 4fce6536 mip=3 exact=1 chain=0 | 7f876947 mip=1 exact=1 chain=0 | 81b6cf30 mip=2 exact=1 chain=0
+c435fc2b = 9ae5caa0 mip=1 exact=1 chain=1
+c69ef92d = 2526bf1c mip=1 exact=1 chain=1
+c6acaf94 = 6d98ab63 mip=1 exact=1 chain=0 | 94553cb1 mip=2 exact=1 chain=0
+c848ae33 = 2a43fbf0 mip=2 exact=1 chain=0 | aeac5220 mip=1 exact=1 chain=0
+c8ecd107 = 00a4a3fe mip=2 exact=1 chain=0 | 5f934aea mip=1 exact=1 chain=0 | 95343036 mip=0 exact=1 chain=1
+cbab5910 = 71ef8993 mip=1 exact=1 chain=0 | 83208b17 mip=1 exact=1 chain=0 | cfb3b0c8 mip=1 exact=1 chain=0
+ccd4b666 = 08dba079 mip=2 exact=1 chain=0 | 23db69a5 mip=1 exact=1 chain=1 | 6fe4ea65 mip=2 exact=1 chain=1
+ccdf8393 = 704683df mip=1 exact=1 chain=0
+cd1bd6f6 = 3abbe744 mip=1 exact=1 chain=0 | a4355b7d mip=2 exact=1 chain=0
+ce3ec4b6 = 6a615c04 mip=1 exact=1 chain=1 | b84b8682 mip=2 exact=1 chain=0 | fed3aa11 mip=1 exact=1 chain=0
+ce89633a = 24481135 mip=2 exact=1 chain=0 | 81b34ff0 mip=1 exact=1 chain=1 | e7d81748 mip=1 exact=1 chain=0
+cf233946 = 99253875 mip=1 exact=1 chain=1
+d030af95 = 1b3a343e mip=1 exact=1 chain=0 | 49cfebff mip=1 exact=1 chain=0 | a02fe4f0 mip=0 exact=1 chain=1
+d0524bfb = abc04501 mip=1 exact=1 chain=0
+d07dd526 = 18c2a7e6 mip=0 exact=1 chain=1 | 5c8867f9 mip=2 exact=1 chain=1 | 8fe0dba1 mip=1 exact=1 chain=0
+d0be8afe = 27a0cafb mip=2 exact=1 chain=0 | 3337e3c8 mip=1 exact=1 chain=0 | c007ee5e mip=1 exact=1 chain=1
+d23276be = 49258636 mip=1 exact=1 chain=0 | 9cb135a0 mip=2 exact=1 chain=0
+d3933df2 = 1092f16b mip=2 exact=1 chain=0 | 1437a03b mip=1 exact=1 chain=0 | 8f8e5c68 mip=1 exact=1 chain=1
+d3c25884 = 9b33f05b mip=2 exact=1 chain=0 | 9d78bfca mip=3 exact=1 chain=0 | c1cea125 mip=1 exact=1 chain=0
+d3cd9504 = 798369b5 mip=1 exact=1 chain=0
+d44d6c55 = 75869dcd mip=2 exact=1 chain=0 | e7fa4d25 mip=1 exact=1 chain=0 | fc065d32 mip=3 exact=1 chain=0
+d4555e5a = 099f105d mip=1 exact=1 chain=0 | 6dec1ea8 mip=1 exact=1 chain=0 | d656b255 mip=1 exact=1 chain=0
+d602d819 = 205f9a17 mip=0 exact=1 chain=1 | 6da14ef0 mip=1 exact=1 chain=1 | c67a0175 mip=2 exact=1 chain=0
+d65c550c = 18835188 mip=1 exact=1 chain=0 | d2cb2f19 mip=2 exact=1 chain=0
+d683f054 = 72cea5d9 mip=2 exact=1 chain=1 | ae57f2f1 mip=1 exact=1 chain=1 | cd9b76c1 mip=1 exact=1 chain=1
+d6875a80 = 9c61f188 mip=1 exact=1 chain=1 | ae57de78 mip=2 exact=1 chain=0 | e9cabf98 mip=1 exact=1 chain=0
+d6de6ec6 = 1ccd5804 mip=2 exact=1 chain=0 | 72d8fb45 mip=1 exact=1 chain=0 | e90e6070 mip=0 exact=1 chain=1
+d713b541 = c1df76d6 mip=1 exact=1 chain=1 | c80366c4 mip=2 exact=1 chain=1 | cfb17fbd mip=1 exact=1 chain=1
+d73201db = dd57b9e6 mip=1 exact=1 chain=0
+d74a92b4 = 61cd6f62 mip=2 exact=1 chain=1 | 7c3db8f1 mip=1 exact=1 chain=1 | c85ef800 mip=3 exact=1 chain=1
+d7d75f48 = 23b9c639 mip=1 exact=1 chain=1
+d9a09450 = 178b9760 mip=1 exact=1 chain=1 | 729928f8 mip=1 exact=1 chain=0 | 965a4e5b mip=2 exact=1 chain=0
+dc098f8d = 00d84de0 mip=1 exact=1 chain=0 | 1b6e7c45 mip=1 exact=1 chain=1 | 6824d614 mip=2 exact=1 chain=0
+dd8a4a66 = 1f7961e1 mip=2 exact=1 chain=0 | 6fb61440 mip=1 exact=1 chain=0
+de341944 = 130ff7bb mip=2 exact=1 chain=0 | 600b0f77 mip=1 exact=1 chain=1 | d68e84d2 mip=2 exact=1 chain=1
+e00640f8 = 91fa7f12 mip=1 exact=1 chain=1 | bfc9e014 mip=2 exact=1 chain=0 | c6bbbde5 mip=1 exact=1 chain=0
+e08cc917 = 25fbf758 mip=2 exact=1 chain=1 | 95bf1d1d mip=0 exact=1 chain=1 | 97f4f166 mip=1 exact=1 chain=0
+e2858e1b = 3d498b60 mip=1 exact=1 chain=0 | 69949d33 mip=2 exact=1 chain=1 | 7a3d1654 mip=0 exact=1 chain=1
+e3f759b8 = de6ceafb mip=1 exact=1 chain=0 | fe67a169 mip=2 exact=1 chain=1
+e4025b5f = 9ee86374 mip=1 exact=1 chain=1
+e6652153 = 3c89a49b mip=1 exact=1 chain=1 | 6c194c88 mip=3 exact=1 chain=1 | bcf9302b mip=2 exact=1 chain=1
+e7723c8d = 856285d6 mip=1 exact=1 chain=0 | 963af9be mip=2 exact=1 chain=0
+e856d57c = 0d684ea1 mip=1 exact=1 chain=0 | 49286bf8 mip=1 exact=1 chain=0 | 65212889 mip=1 exact=1 chain=0
+e8e3da77 = dadc7dfc mip=1 exact=1 chain=0 | dc6ff2be mip=0 exact=1 chain=1
+e9af6d61 = 207bfe32 mip=2 exact=1 chain=0 | 2abd8735 mip=1 exact=1 chain=0
+ea79bafa = 089848cf mip=1 exact=1 chain=0 | 3bde0808 mip=1 exact=1 chain=0
+ec5ce39a = 4c963021 mip=2 exact=1 chain=0 | 74021456 mip=0 exact=1 chain=1 | e55bffd8 mip=1 exact=1 chain=0
+ec7bb0fa = 28156eb7 mip=1 exact=1 chain=0 | 2b9e4b60 mip=2 exact=1 chain=0 | 9adb2a70 mip=0 exact=1 chain=1
+ed144eda = 49f75c20 mip=2 exact=1 chain=1 | 4bce3e0e mip=1 exact=1 chain=0 | 6edc6413 mip=0 exact=1 chain=1
+f1107aad = 7ce28321 mip=1 exact=1 chain=1
+f2646d21 = 15fbfc67 mip=1 exact=1 chain=0 | 8368f4e4 mip=1 exact=1 chain=0 | ed1d06b1 mip=1 exact=1 chain=0
+f2903153 = 29d6ca8c mip=3 exact=1 chain=0 | a854b548 mip=1 exact=1 chain=0 | acd279a2 mip=2 exact=1 chain=0
+f46e3fe6 = 95637825 mip=3 exact=1 chain=0 | c0f8f308 mip=2 exact=1 chain=0 | ec6993a9 mip=1 exact=1 chain=1
+f510ebdb = 84e92891 mip=1 exact=1 chain=0 | c790160c mip=2 exact=1 chain=0
+f5b3ad19 = 20efec04 mip=1 exact=1 chain=1 | 5272ca75 mip=1 exact=1 chain=0 | 7563a0cd mip=2 exact=1 chain=0
+f642139e = 0713b830 mip=1 exact=1 chain=0 | 5cd48507 mip=1 exact=1 chain=0 | e01fa60c mip=1 exact=1 chain=0
+f7462f74 = 5b3c411d mip=1 exact=1 chain=0 | f5f8b817 mip=2 exact=1 chain=0
+f7bf1c9b = 61cf6cb8 mip=1 exact=1 chain=1 | 86045e90 mip=2 exact=1 chain=0 | f3d843e0 mip=1 exact=1 chain=0
+fb5cd7be = 82112355 mip=1 exact=1 chain=1 | db82265f mip=1 exact=1 chain=0 | f6c86c2f mip=2 exact=1 chain=0
+fb7a0fd2 = 1596428b mip=1 exact=1 chain=1 | 98ed8920 mip=2 exact=1 chain=0 | d5ca44cf mip=2 exact=1 chain=1
+fc6b51c6 = 31401677 mip=1 exact=1 chain=0
+fcc6992c = 2711d6ed mip=1 exact=1 chain=0 | a044142b mip=2 exact=1 chain=0
+fcdd3e98 = 13b039d1 mip=3 exact=1 chain=0 | 5551e8d7 mip=1 exact=1 chain=0 | f14b3aff mip=2 exact=1 chain=0
+fee2b7db = 7e9f37d5 mip=1 exact=0 chain=0 rmse=7.11
+fef783fb = 203f762b mip=3 exact=1 chain=0 | a2afb9de mip=2 exact=1 chain=0 | eb8fdbfc mip=1 exact=1 chain=0
+ff618d2a = 66cf17b0 mip=1 exact=1 chain=0
+degenerate = 073907f0 0bce9173 15f5a1c4 19da72db 2af680b8 2c7d8874 5453b89b 673fda2d 69f515d7 79dcaf06 86e6d9e1 8ac90afe a2646639 ae4bb526 c1d1ce93 c262bbe4 dd5bfd8d e3f97a1a eacfd723 fb1e2be7

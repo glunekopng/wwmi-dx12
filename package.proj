@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Package" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <WwmiRoot>$(MSBuildThisFileDirectory)</WwmiRoot>
+    <WwmiVersion>$([System.IO.File]::ReadAllText('$(WwmiRoot)VERSION').Trim())</WwmiVersion>
+    <WwmiStage>$(WwmiRoot)build_addon\release\wwmi-dx12-$(WwmiVersion)\</WwmiStage>
+    <WwmiZip>$(WwmiRoot)build_addon\release\wwmi-dx12-$(WwmiVersion).zip</WwmiZip>
+  </PropertyGroup>
+  <ItemGroup>
+    <WwmiPackageFile Include="$(WwmiRoot)build_addon\wwmi_dx12.addon64" To="wwmi_dx12.addon64" />
+    <WwmiPackageFile Include="$(WwmiRoot)package\wwmi_dx12_launch.bat" To="wwmi_dx12_launch.bat" />
+    <WwmiPackageFile Include="$(WwmiRoot)package\wwmi_dx12_launch.ps1" To="wwmi_dx12_launch.ps1" />
+    <WwmiPackageFile Include="$(WwmiRoot)README.md" To="wwmi_dx12_README.md" />
+    <WwmiPackageFile Include="$(WwmiRoot)shaders_cso\IbVbHash.cso" To="wwmi_dx12\IbVbHash.cso" />
+    <WwmiPackageFile Include="$(WwmiRoot)shaders_cso\BufCopy.cso" To="wwmi_dx12\BufCopy.cso" />
+    <WwmiPackageFile Include="$(WwmiRoot)package\wwmi_dx12_seed.lodcache" To="wwmi_dx12\cache\seed-$(WwmiVersion).lodcache" />
+    <WwmiPackageFile Include="$(WwmiRoot)LICENSE" To="wwmi_dx12\LICENSE" />
+    <WwmiPackageFile Include="$(WwmiRoot)THIRD-PARTY-NOTICES.md" To="wwmi_dx12\THIRD-PARTY-NOTICES.md" />
+    <WwmiPackageFile Include="$(WwmiRoot)third_party\3Dmigoto\COPYING.txt" To="wwmi_dx12\licenses\3Dmigoto-COPYING.txt" />
+    <WwmiPackageFile Include="$(WwmiRoot)third_party\3Dmigoto\LICENSE.GPL.txt" To="wwmi_dx12\licenses\3Dmigoto-LICENSE.GPL.txt" />
+    <WwmiPackageFile Include="$(WwmiRoot)third_party\3Dmigoto\AUTHORS.txt" To="wwmi_dx12\licenses\3Dmigoto-AUTHORS.txt" />
+    <WwmiPackageFile Include="$(WwmiRoot)third_party\3Dmigoto\pcre2-10.30\LICENCE" To="wwmi_dx12\licenses\PCRE2-LICENCE.txt" />
+    <WwmiPackageFile Include="$(WwmiRoot)third_party\3Dmigoto\DirectXTK\LICENSE" To="wwmi_dx12\licenses\DirectXTK-LICENSE.txt" />
+    <WwmiPackageFile Include="$(WwmiRoot)reshade_addon\sdk\LICENSE.md" To="wwmi_dx12\licenses\ReShade-LICENSE.md" />
+    <WwmiPackageFile Include="$(WwmiRoot)reshade_addon\sdk\deps\imgui\LICENSE.txt" To="wwmi_dx12\licenses\imgui-LICENSE.txt" />
+    <WwmiPackageFile Include="$(WwmiRoot)package\licenses\crc32c-LICENSE.txt" To="wwmi_dx12\licenses\crc32c-LICENSE.txt" />
+    <WwmiPackageFile Include="$(WwmiRoot)package\licenses\bcdec-LICENSE.txt" To="wwmi_dx12\licenses\bcdec-LICENSE.txt" />
+    <WwmiPackageFile Include="$(WwmiRoot)third_party\dxc\bin\x64\dxcompiler.dll" To="wwmi_dx12\dxc\dxcompiler.dll" />
+    <WwmiPackageFile Include="$(WwmiRoot)third_party\dxc\bin\x64\dxil.dll" To="wwmi_dx12\dxc\dxil.dll" />
+    <WwmiPackageFile Include="$(WwmiRoot)third_party\dxc\LICENSE-LLVM.txt" To="wwmi_dx12\dxc\LICENSE-LLVM.txt" />
+    <WwmiPackageFile Include="$(WwmiRoot)third_party\dxc\LICENSE-MIT.txt" To="wwmi_dx12\dxc\LICENSE-MIT.txt" />
+    <WwmiPackageFile Include="$(WwmiRoot)third_party\dxc\LICENSE-MS.txt" To="wwmi_dx12\dxc\LICENSE-MS.txt" />
+  </ItemGroup>
+  <UsingTask TaskName="WwmiWriteUtf16" TaskFactory="RoslynCodeTaskFactory" AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll">
+    <ParameterGroup>
+      <Source ParameterType="System.String" Required="true" />
+      <Destination ParameterType="System.String" Required="true" />
+    </ParameterGroup>
+    <Task>
+      <Code Type="Fragment" Language="cs"><![CDATA[
+File.WriteAllText(Destination, File.ReadAllText(Source), Encoding.Unicode);
+]]></Code>
+    </Task>
+  </UsingTask>
+  <Target Name="Package">
+    <MSBuild Projects="$(WwmiRoot)wwmi-dx12.sln" Targets="Build" BuildInParallel="true"
+             Properties="Configuration=Release;Platform=x64;WwmiRT=0;WwmiDeploy=false" />
+    <RemoveDir Directories="$(WwmiStage)" />
+    <Copy SourceFiles="@(WwmiPackageFile)" DestinationFiles="@(WwmiPackageFile->'$(WwmiStage)%(To)')" />
+    <WwmiWriteUtf16 Source="$(WwmiRoot)package\wwmi_dx12.ini" Destination="$(WwmiStage)wwmi_dx12.ini" />
+    <ZipDirectory SourceDirectory="$(WwmiStage)" DestinationFile="$(WwmiZip)" Overwrite="true" />
+    <GetFileHash Files="$(WwmiZip)" Algorithm="SHA256">
+      <Output TaskParameter="Hash" PropertyName="WwmiZipHash" />
+    </GetFileHash>
+    <Message Importance="high" Text="$(WwmiZip)  sha256 $(WwmiZipHash)" />
+  </Target>
+</Project>
