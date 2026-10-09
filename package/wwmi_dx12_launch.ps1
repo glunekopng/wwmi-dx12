@@ -177,7 +177,7 @@ if (-not (Test-ReShade $proxy)) {
 
 # Read-only while the game starts: it rewrites Engine.ini and drops settings it does not keep.
 $engineIni = [IO.Path]::Combine($root, "Client\Saved\Config\WindowsNoEditor\Engine.ini")
-$cvars = [ordered]@{
+$engineCvars = [ordered]@{
     "r.TextureStreaming"                = "1"
     "r.Streaming.FullyLoadUsedTextures" = "1"
     "r.Streaming.Boost"                 = "30"
@@ -185,37 +185,46 @@ $cvars = [ordered]@{
     "r.Streaming.HLODStrategy"          = "2"
     "r.MipMapLODBias"                   = "-1"
 }
-function Set-EngineCvars {
+# As XXMI Launcher writes it for WWMI: characters keep the model mods replace out to the farthest camera.
+$userEngineIni = [IO.Path]::Combine($root, "Client\Config\UserEngine.ini")
+$userEngineCvars = [ordered]@{
+    "r.Kuro.SkeletalMesh.DistanceLODBaseFOV" = "165"
+}
+function Set-IniValues([string]$path, [string]$section, $values) {
     $lines = New-Object Collections.Generic.List[string]
-    if ([IO.File]::Exists($engineIni)) {
-        [IO.File]::SetAttributes($engineIni, [IO.File]::GetAttributes($engineIni) -band -bnot [IO.FileAttributes]::ReadOnly)
-        foreach ($l in [IO.File]::ReadAllLines($engineIni)) { $lines.Add($l) }
+    if ([IO.File]::Exists($path)) {
+        [IO.File]::SetAttributes($path, [IO.File]::GetAttributes($path) -band -bnot [IO.FileAttributes]::ReadOnly)
+        foreach ($l in [IO.File]::ReadAllLines($path)) { $lines.Add($l) }
     } else {
-        [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($engineIni))
+        [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($path))
     }
+    $header = "[$section]"
     $out = New-Object Collections.Generic.List[string]
     $seen = @{}
-    $inSys = $false
-    $hasSys = $false
+    $inSection = $false
+    $hasSection = $false
     foreach ($l in $lines) {
         $t = $l.Trim()
         if ($t.StartsWith("[") -and $t.EndsWith("]")) {
-            if ($inSys) { foreach ($k in $cvars.Keys) { if (-not $seen[$k]) { $out.Add("$k=$($cvars[$k])"); $seen[$k] = $true } } }
-            $inSys = ($t -ieq "[SystemSettings]")
-            if ($inSys) { $hasSys = $true }
-        } elseif ($inSys -and $t.Contains("=")) {
+            if ($inSection) { foreach ($k in $values.Keys) { if (-not $seen[$k]) { $out.Add("$k=$($values[$k])"); $seen[$k] = $true } } }
+            $inSection = ($t -ieq $header)
+            if ($inSection) { $hasSection = $true }
+        } elseif ($inSection -and $t.Contains("=")) {
             $k = $t.Split("=", 2)[0].Trim()
-            if ($cvars.Contains($k)) { $l = "$k=$($cvars[$k])"; $seen[$k] = $true }
+            if ($values.Contains($k)) { $l = "$k=$($values[$k])"; $seen[$k] = $true }
         }
         $out.Add($l)
     }
-    if ($inSys) { foreach ($k in $cvars.Keys) { if (-not $seen[$k]) { $out.Add("$k=$($cvars[$k])") } } }
-    if (-not $hasSys) {
+    if ($inSection) { foreach ($k in $values.Keys) { if (-not $seen[$k]) { $out.Add("$k=$($values[$k])") } } }
+    if (-not $hasSection) {
         $out.Add("")
-        $out.Add("[SystemSettings]")
-        foreach ($k in $cvars.Keys) { $out.Add("$k=$($cvars[$k])") }
+        $out.Add($header)
+        foreach ($k in $values.Keys) { $out.Add("$k=$($values[$k])") }
     }
-    [IO.File]::WriteAllLines($engineIni, $out)
+    [IO.File]::WriteAllLines($path, $out)
+}
+function Set-EngineCvars {
+    Set-IniValues $engineIni "SystemSettings" $engineCvars
     [IO.File]::SetAttributes($engineIni, [IO.File]::GetAttributes($engineIni) -bor [IO.FileAttributes]::ReadOnly)
 }
 function Clear-EngineReadOnly {
@@ -232,6 +241,7 @@ foreach ($t in "uhd", "hd", "sd") {
 $problem = ""
 try {
     Set-EngineCvars
+    Set-IniValues $userEngineIni "ConsoleVariables" $userEngineCvars
     $start = New-Object Diagnostics.ProcessStartInfo
     $start.FileName = $exe
     $start.Arguments = "-krqlv=$tier -dx12"

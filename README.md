@@ -59,10 +59,11 @@ engine with the game in **DirectX 12**, on the WWMI folder and mods you already 
    copies it there (by hand: copy it yourself). The `wwmi_dx12\` folder can stay in `<Win64>`.
 5. Start the game in DirectX 12, either way:
    - **Easy:** double-click `wwmi_dx12_launch.bat`. It finds your WWMI folder (or asks), saves it in
-     `wwmi_dx12.ini`, writes the texture settings mods need into `Engine.ini` and starts DX12.
+     `wwmi_dx12.ini`, writes the settings mods need into `Engine.ini` and `UserEngine.ini` and starts DX12.
    - **By hand:** set `wwmi_dir` in `wwmi_dx12.ini` once, choose DirectX 12 in the game's settings and
-     start the game as usual. XXMI Launcher already writes the `Engine.ini` lines when it starts WWMI;
-     if mod textures stay vanilla, add them (see What it changes) or run the bat once.
+     start the game as usual. XXMI Launcher already writes these lines when it starts WWMI; if mod
+     textures, or whole characters at a distance, stay vanilla, add them (see What it changes) or run the
+     bat once.
 
 To update, unzip over the old files and keep your `wwmi_dx12.ini`.
 
@@ -149,11 +150,13 @@ at the first start like a shared file.
   `r.Streaming.Boost=30`, `r.Streaming.MinBoost=30`, `r.Streaming.HLODStrategy=2`, `r.MipMapLODBias=-1`,
   so mod textures match at full resolution. The launcher keeps the file read-only for the first minute
   of a launch (the game rewrites it at start-up), then writable again.
+- `Client\Config\UserEngine.ini`, `[ConsoleVariables]`: `r.Kuro.SkeletalMesh.DistanceLODBaseFOV=165`, as
+  XXMI Launcher sets it, so characters keep the model mods replace out to the farthest camera.
 - In `<Win64>\wwmi_dx12\cache`: learned texture matches and patched shaders.
 - In your WWMI folder: only `d3dx_user.ini` (as in DX11). Mods are only read.
 - The launcher stops on a `dxgi.dll` that is not ReShade.
 - **Uninstall:** delete everything starting with `wwmi_dx12` in `<Win64>` (the `wwmi_dx12` folder holds
-  the caches); ReShade if nothing else uses it; optionally the `Engine.ini` lines.
+  the caches); ReShade if nothing else uses it; optionally the `Engine.ini` and `UserEngine.ini` lines.
 
 ## Building
 
