@@ -170,8 +170,7 @@ Visual Studio 2022 or later (C++ desktop, Windows SDK). `git clone --recurse-sub
 `msbuild wwmi-dx12.sln /p:Configuration=Release /p:Platform=x64`. The add-on's shaders build with it. The
 output is `build_addon\wwmi_dx12.addon64`.
 
-`msbuild package.proj` builds the same and packs the release zip into `build_addon\release\`. A pushed
-`v*` tag does that on GitHub and attaches the zip to the tag's release.
+`msbuild package.proj` builds the same and packs the release zip into `build_addon\release\`.
 
 Decensor and RabbitFX also need `dxcompiler.dll` and `dxil.dll` at run time, in `<Win64>\wwmi_dx12\dxc\`:
 copy them there from `third_party\dxc\bin\x64` (a
