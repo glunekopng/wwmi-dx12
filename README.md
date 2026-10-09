@@ -193,7 +193,7 @@ The work wwmi-dx12 is built from and runs:
 - [caverabbit](https://gamebanana.com/members/2987570) - RabbitFX
 - [crosire](https://github.com/crosire) - ReShade and its add-on API
 
-**Mod authors:** [Actice](https://gamebanana.com/members/3279260), [Ander001](https://gamebanana.com/members/2872805), [Apoc23](https://gamebanana.com/members/2844846), [astrais](https://gamebanana.com/members/3591617), [ganyu520](https://gamebanana.com/members/2503894), [Hua-Hua](https://gamebanana.com/members/5335246), [HuiYoo](https://gamebanana.com/members/4301549), [kongxinrumeng](https://gamebanana.com/members/2437196), [MochiDauXanh](https://gamebanana.com/members/3249732), [monsoon04](https://gamebanana.com/members/2288970), [Morning_Star](https://gamebanana.com/members/2798606), [xucaikui](https://gamebanana.com/members/3720155), [Zlevir](https://gamebanana.com/members/2694449)
+**Mod authors:** [Actice](https://gamebanana.com/members/3279260), [ahuang](https://gamebanana.com/members/2623583), [Ander001](https://gamebanana.com/members/2872805), [Apoc23](https://gamebanana.com/members/2844846), [astrais](https://gamebanana.com/members/3591617), [ganyu520](https://gamebanana.com/members/2503894), [Hua-Hua](https://gamebanana.com/members/5335246), [HuiYoo](https://gamebanana.com/members/4301549), [kongxinrumeng](https://gamebanana.com/members/2437196), [MochiDauXanh](https://gamebanana.com/members/3249732), [monsoon04](https://gamebanana.com/members/2288970), [Morning_Star](https://gamebanana.com/members/2798606), [xucaikui](https://gamebanana.com/members/3720155), [Zlevir](https://gamebanana.com/members/2694449)
 
 Thanks to everyone credited by [WWMI](https://github.com/SpectrumQT/WWMI-Package#credits), whose work this builds on.
 
