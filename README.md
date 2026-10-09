@@ -18,6 +18,8 @@ engine with the game in **DirectX 12**, on the WWMI folder and mods you already 
   from the game's own data. An optional look-alike match (off by default) covers copies it can't prove.
   If a mod's textures are missing, open that character's screen once: the match is learned there and kept
 - **Meshes** - mesh replacement on merged skeletons
+- **Copies of a character** - two copies of one modded character at once (an idle pose, an ult's clone) each
+  keep their own skeleton instead of mixing as on DX11; tested on two characters
 - **Shape keys**
 - **RabbitFX**
 - **Decensor**
@@ -75,7 +77,6 @@ with a `wwmi-dx12` window showing "Active mods" above 0.
 
 ## Known Issues
 
-- Duplicate modded objects on screen glitch (merged skeleton limitation, same as WWMI)
 - WWMI's own hotkeys and guides are not available
 - Loading mods without a restart (**Reload mods**) is untested; restart the game after adding a mod
 - Decensor and RabbitFX mods prepare shaders on first sight (one-time stutter, saved for next launch)
