@@ -17,7 +17,7 @@ enum ProfBucket {
     PROF_CB_Copy,        //   - its rows read out of the upload heap (write-combined)
     PROF_CB_Crc,         //   - the crc32c over it
     PROF_CB_Map,         //   - Map/Unmap of the upload buffer
-    PROF_CB_TexLod,      //   - TexLodOnSample: the LOD signature + candidate scan
+    PROF_CB_TexLod,      //   - TexLookOnCut: the patch decode + reference scan
     PROF_CopyTexRegion,  // on_copy_texture_region      (mip-shift lineage propagation)
     PROF_Barrier,        // on_barrier                  (resource-state tracking)
     PROF_BindDescTables, // on_bind_descriptor_tables

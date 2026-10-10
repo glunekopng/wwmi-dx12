@@ -21,6 +21,8 @@ void DrawProbeVb6Reader(const DrawArgs& da, DrawClaim& dc);   // draw_probes.cpp
 void DrawProbeOffLeak(const DrawArgs& da, DrawClaim& dc);     // draw_probes.cpp
 void DrawProbeUnstamp(const ResInfo& ri, bool restored);      // draw_probes.cpp
 void StampClaimedTextures(const DrawArgs& da, DrawClaim& dc); // draw_texswap.cpp
+// Where a game character draw binds each texture: recorded while crawling, linked from a seed (draw_comp.cpp).
+void NoteMeshPlaces(const DrawArgs& da);
 // The game's own descriptors back in every stamped slot of this draw's tables; how many (draw_texswap.cpp).
 unsigned UnstampClaimedTextures(const DrawArgs& da);
 // The claimed draw replaced by the mod's geometry; the hook's return value (draw_inject.cpp).

@@ -43,7 +43,7 @@
       <DebugInformationFormat>None</DebugInformationFormat>
       <LanguageStandard>stdcpp20</LanguageStandard>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
-      <ExceptionHandling>Sync</ExceptionHandling>
+      <ExceptionHandling>Async</ExceptionHandling>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <PreprocessorDefinitions>IMGUI_DISABLE_INCLUDE_IMCONFIG_H;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>$(WwmiRoot)reshade_addon;$(WwmiRoot)reshade_addon\sdk\include;$(WwmiRoot)src;$(WwmiRoot)reshade_addon\sdk\deps\imgui;$(WwmiPristineDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -114,6 +114,8 @@ exit /b 0</Command>
     <ClCompile Include="reshade_addon\textures\texture_module.cpp" />
     <ClCompile Include="reshade_addon\rabbitfx\pso_blend.cpp" />
     <ClCompile Include="reshade_addon\textures\tex_lod.cpp" />
+    <ClCompile Include="reshade_addon\textures\tex_look.cpp" />
+    <ClCompile Include="reshade_addon\textures\tex_crawl.cpp" />
     <ClCompile Include="reshade_addon\textures\tex_eager.cpp" />
     <ClCompile Include="reshade_addon\instrumentation\tex_timing.cpp" />
     <ClCompile Include="reshade_addon\mods\skeleton.cpp" />

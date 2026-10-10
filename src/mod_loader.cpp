@@ -1,6 +1,7 @@
 #include "mod_loader.h"
 #include "log.h"
 #include "../reshade_addon/textures/tex_lod.h"         // TexLodInit: the LOD cache read again on F5
+#include "../reshade_addon/textures/tex_look.h"        // TexLookInit: a seed dropped in since taken on F5
 #include "../reshade_addon/migoto/port_api.h"          // their [Resource*] registry
 #include "../reshade_addon/instrumentation/profiler.h" // ET:TexStore
 #include <windows.h>
@@ -9,7 +10,9 @@
 #include <algorithm>
 #include <string>
 #include <filesystem>
-#include <cwctype> // towlower -- SrvHeapCapacityFor's extension match
+#include <map>
+#include <unordered_set>
+#include <cwctype> // towlower -- EnumerateMods' folder match
 #include <d3d12.h>
 #include <wrl.h>
 
@@ -17,11 +20,9 @@ using Microsoft::WRL::ComPtr;
 using namespace reshade::api;
 namespace fs = std::filesystem;
 
-static device*      g_device = nullptr;
-static std::wstring g_mods_dir = L"";
-static bool         g_reload_pending = false;
+static device* g_device = nullptr;
+static bool    g_reload_pending = false;
 
-static int g_last_mods = 0;
 
 static ComPtr<ID3D12DescriptorHeap>              g_srv_heap;
 static std::vector<ComPtr<ID3D12DescriptorHeap>> g_srv_more; // further blocks of g_srv_heap_cap, as the library grows
@@ -62,19 +63,15 @@ static D3D12_CPU_DESCRIPTOR_HANDLE NextModSrv()
     ++g_srv_heap_size;
     return c;
 }
-static uint32_t SrvHeapCapacityFor(const std::wstring& mods_dir, unsigned* dds_out)
+static uint32_t SrvHeapCapacity(unsigned* dds_out)
 {
-    unsigned        dds = 0;
-    std::error_code ec;
-    if (!mods_dir.empty() && fs::is_directory(mods_dir, ec)) {
-        for (fs::recursive_directory_iterator it(mods_dir, fs::directory_options::skip_permission_denied, ec), end;
-            !ec && it != end; it.increment(ec)) {
-            if (!it->is_regular_file(ec)) continue;
-            std::wstring ext = it->path().extension().wstring();
-            for (auto& c : ext) c = (wchar_t)towlower(c);
-            if (ext == L".dds") ++dds;
-        }
-    }
+    unsigned dds = 0;
+    PortApi::ForEachCustomResource(
+        [](const wchar_t*, const wchar_t* filename, int, bool, ID3D12Resource*, void* user) {
+            const size_t n = filename ? wcslen(filename) : 0;
+            if (n >= 4 && _wcsicmp(filename + n - 4, L".dds") == 0) ++*static_cast<unsigned*>(user);
+        },
+        &dds);
     if (dds_out) *dds_out = dds;
     const uint32_t need = 2u * dds + 256u;
     const uint32_t cap = (need < 1024u) ? 1024u : ((need + 63u) & ~63u);
@@ -87,14 +84,16 @@ void ModLoader::Init(device* device)
     g_device = device;
 }
 
-void ModLoader::SetDir(const wchar_t* path)
-{
-    g_mods_dir = path;
-}
-
 void ModLoader::GetLastStats(int& mods)
 {
-    mods = g_last_mods;
+    static unsigned s_gen = ~0u;
+    static int      s_mods = 0;
+    const unsigned  gen = PortApi::LoadGeneration();
+    if (gen != s_gen) {
+        s_gen = gen;
+        s_mods = (int)EnumerateMods().size();
+    }
+    mods = s_mods;
 }
 
 static void DoReload()
@@ -104,36 +103,9 @@ static void DoReload()
         logger::write("ModLoader: skipping reload -- device is not D3D12 (api=%u)", (unsigned)g_device->get_api());
         return;
     }
-    ID3D12Device* d3d12_dev = reinterpret_cast<ID3D12Device*>(g_device->get_native());
-    if (!d3d12_dev) return;
-
-    logger::write("ModLoader: scanning directory %S", g_mods_dir.c_str());
     TexLodInit(); // the LOD cache read again, and any seed dropped in since taken
-
-    g_last_mods = 0;
+    TexLookInit();
     g_srv_heap_size = 0;
-
-    if (!g_srv_heap) {
-        unsigned                   n_dds = 0;
-        const uint32_t             cap = SrvHeapCapacityFor(g_mods_dir, &n_dds);
-        D3D12_DESCRIPTOR_HEAP_DESC heap_desc = { D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, cap, D3D12_DESCRIPTOR_HEAP_FLAG_NONE };
-        HRESULT                    hr = d3d12_dev->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(&g_srv_heap));
-        if (SUCCEEDED(hr)) {
-            g_srv_descriptor_size = d3d12_dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-            g_srv_heap_cap = cap;
-            TexStoreAlloc(cap);
-            logger::write("ModLoader: mod SRV heap sized %u for the library (%u .dds under %S)",
-                cap, n_dds, g_mods_dir.c_str());
-        } else {
-            logger::write("ModLoader Error: Failed to create SRV heap hr=%08x", hr);
-            return;
-        }
-    }
-
-    std::error_code ec;
-    if (!fs::exists(g_mods_dir, ec)) return;
-    g_last_mods = (int)ModLoader::EnumerateMods().size();
-    logger::write("ModLoader: reload complete. %d mods", g_last_mods);
 }
 
 static std::vector<ModLoader::TexResource> g_tex_resources;
@@ -252,16 +224,28 @@ ID3D12Resource* ModLoader::TexResOfSrv(D3D12_CPU_DESCRIPTOR_HANDLE srv)
 }
 static bool g_tex_ovr_loaded = false;
 
-// Ini parsing is owned by the ported engine; this only reports the mod folder count once the heap exists.
+// Ini parsing is owned by the ported engine; runs once it has loaded: the SRV heap, sized from what it declared.
 void ModLoader::LoadTextureOverrides()
 {
     if (g_tex_ovr_loaded) return;
     ID3D12Device* dev = g_device ? reinterpret_cast<ID3D12Device*>(g_device->get_native()) : nullptr;
-    if (!dev || !g_srv_heap) return; // wait until heap exists (created in Reload)
+    if (!dev) return;
     g_tex_ovr_loaded = true;
-
-    logger::write("ModLoader: %zu mod folders discovered (ini parsing is owned by the Wcl engine)",
-        EnumerateMods().size());
+    if (!g_srv_heap) {
+        unsigned                   n_dds = 0;
+        const uint32_t             cap = SrvHeapCapacity(&n_dds);
+        D3D12_DESCRIPTOR_HEAP_DESC heap_desc = { D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, cap, D3D12_DESCRIPTOR_HEAP_FLAG_NONE };
+        HRESULT                    hr = dev->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(&g_srv_heap));
+        if (FAILED(hr)) {
+            logger::write("ModLoader Error: Failed to create SRV heap hr=%08x", hr);
+            return;
+        }
+        g_srv_descriptor_size = dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        g_srv_heap_cap = cap;
+        TexStoreAlloc(cap);
+        logger::write("ModLoader: mod SRV heap sized %u for the library (%u .dds declared)", cap, n_dds);
+    }
+    logger::write("ModLoader: %zu mods (from the inis their engine parsed)", EnumerateMods().size());
 }
 bool ModLoader::SubstantiateWclResources()
 {
@@ -365,51 +349,48 @@ const std::vector<ModLoader::TexResource>& ModLoader::TexResources()
 {
     return g_tex_resources;
 }
-bool ModLoader::IsExcludedEntry(const wchar_t* name)
-{
-    if (!name) return false;
-    // WWMI-shipped d3dx.ini [Include] exclude_recursive globs: "DISABLED*" and "desktop.ini".
-    if (_wcsnicmp(name, L"DISABLED", 8) == 0) return true; // case-insensitive "DISABLED" prefix
-    if (_wcsicmp(name, L"desktop.ini") == 0) return true;
-    return false;
-}
-
 std::vector<ModLoader::DiscoveredMod> ModLoader::EnumerateMods()
 {
-    std::vector<DiscoveredMod> out;
-    std::error_code            ec;
-    if (g_mods_dir.empty() || !fs::exists(g_mods_dir, ec)) return out;
-
-    // Top-level folders = mods. Sorted so mod_id assignment is stable across runs.
-    std::vector<fs::path> folders;
-    for (auto& e : fs::directory_iterator(g_mods_dir, ec)) {
-        if (!e.is_directory(ec)) continue;
-        if (IsExcludedEntry(e.path().filename().c_str())) continue; // DISABLED* mod folder = off
-        folders.push_back(e.path());
-    }
-    std::sort(folders.begin(), folders.end());
-
-    for (auto& f : folders) {
-        DiscoveredMod m;
-        m.dir = f.wstring();
-        std::error_code ec2;
-        for (auto& fe : fs::recursive_directory_iterator(f, ec2)) {
-            if (ec2) break;
-            if (!fe.is_regular_file(ec2)) continue;
-            if (_wcsicmp(fe.path().extension().wstring().c_str(), L".ini") != 0) continue;
-            // Skip .ini under any DISABLED* subfolder, or named DISABLED*/desktop.ini (per-component check).
-            fs::path rel = fs::relative(fe.path(), f, ec2);
-            bool     skip = false;
-            for (const auto& part : rel)
-                if (IsExcludedEntry(part.c_str())) {
-                    skip = true;
-                    break;
-                }
-            if (skip) continue;
-            m.inis.push_back(fe.path().wstring());
+    struct Found {
+        fs::path root;
+        ModIni   ini;
+    };
+    std::vector<Found> found;
+    PortApi::ForEachModIni(
+        [](const wchar_t* ini, const wchar_t* ns, const wchar_t* root, void* user) {
+            static_cast<std::vector<Found>*>(user)->push_back({ root, { ini, ns } });
+        },
+        &found);
+    auto lower = [](std::wstring s) {
+        for (auto& c : s) c = (wchar_t)towlower(c);
+        return s;
+    };
+    std::unordered_set<std::wstring> ini_dirs;
+    for (const auto& f : found) ini_dirs.insert(lower(fs::path(f.ini.path).parent_path().wstring()));
+    std::map<fs::path, DiscoveredMod> mods;
+    for (auto& f : found) {
+        const fs::path folder = fs::path(f.ini.path).parent_path();
+        fs::path       key = f.ini.path;
+        fs::path       dir = f.root;
+        fs::path       walk = f.root;
+        for (const auto& part : folder.lexically_relative(f.root)) {
+            if (part == L".") break;
+            walk /= part;
+            if (ini_dirs.count(lower(walk.wstring()))) {
+                key = walk;
+                dir = walk;
+                break;
+            }
         }
-        std::sort(m.inis.begin(), m.inis.end()); // deterministic merge order (mod-fix < mod-Lod < mod-auto-generated)
-        if (!m.inis.empty()) out.push_back(std::move(m));
+        DiscoveredMod& m = mods[key];
+        m.dir = dir.wstring();
+        m.inis.push_back(std::move(f.ini));
+    }
+    std::vector<DiscoveredMod> out;
+    for (auto& kv : mods) {
+        std::sort(kv.second.inis.begin(), kv.second.inis.end(),
+            [](const ModIni& a, const ModIni& b) { return a.path < b.path; });
+        out.push_back(std::move(kv.second));
     }
     return out;
 }

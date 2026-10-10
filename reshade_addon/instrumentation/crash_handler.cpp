@@ -17,6 +17,7 @@
 //  handler is in our module and on every stack it captures. The '*' markers say which frames are ours.
 // ===========================================================================
 #include "crash_handler.h"
+#include "../config.h" // g_faulted
 #include "../../src/log.h" // logger::utf8_locale -- the context is a wide section name
 
 #include <windows.h>
@@ -184,12 +185,13 @@ int Filter(void* exception_pointers, const char* where)
                 else
                     Write(f, "     [%02u] %p\n", (unsigned)i, (void*)a);
             }
-            Write(f, "  -> skipped this call and continued\n");
+            Write(f, "  -> skipped this call; the add-on is off until the game restarts\n");
             fflush(f);
             fclose(f);
         }
         if (g_cs_ready) LeaveCriticalSection(&g_cs);
     }
+    g_faulted.store(true);
     return EXCEPTION_EXECUTE_HANDLER; // swallow: skip this callback, keep the frame alive
 }
 

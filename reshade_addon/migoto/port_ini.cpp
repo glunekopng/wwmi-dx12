@@ -71,3 +71,15 @@ bool PortIniNamespace(const wchar_t* abs_ini_path, wstring* ret)
     }
     return false;
 }
+
+void PortForEachIniFile(void (*cb)(const wstring& rel_path, const wstring& ns, void* user), void* user)
+{
+    std::set<wstring, WStringInsensitiveLess> seen;
+    for (auto& kv : ini_sections) {
+        const IniSection& s = kv.second;
+        const wstring&    file = s.ini_path.empty() ? s.ini_namespace : s.ini_path;
+        if (file.empty() || !seen.insert(file).second)
+            continue;
+        cb(file, s.ini_namespace, user);
+    }
+}

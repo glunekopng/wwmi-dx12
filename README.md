@@ -14,10 +14,13 @@ engine with the game in **DirectX 12**, on the WWMI folder and mods you already 
 
 ## What it can do
 
-- **Textures** - texture overrides, also on the game's lower-resolution streamed copies of a modded texture, matched
-  from the game's own data. An optional look-alike match (off by default) covers copies it can't prove.
-  If a mod's textures are missing, open that character's screen once: the match is learned there and kept
-- **Meshes** - mesh replacement on merged skeletons
+- **Textures** - texture overrides, also when the game's texture is not the one the mod was made for: a
+  lower-resolution streamed copy, the UHD resources, or a texture a client update re-encoded. Each is
+  matched to the mod's texture by its lower mips, by how it looks, or by where it is drawn on the
+  character (see Texture matches). If a mod's textures are missing, open that character's screen once:
+  the match is learned there and kept
+- **Meshes** - mesh replacement on merged skeletons; several mods on one mesh (a body mod and a face mod)
+  all draw, as on DX11
 - **Copies of a character** - two copies of one modded character at once (an idle pose, an ult's clone) each
   keep their own skeleton instead of mixing as on DX11; tested on two characters
 - **Shape keys**
@@ -25,17 +28,18 @@ engine with the game in **DirectX 12**, on the WWMI folder and mods you already 
 - **Decensor**
 - **Frame generation** - modded characters and generated frames together
 - **Mod logic** - hosts the XXMI fork of 3dmigoto: a mod's ini logic, toggles and keys run as written
-- **Same WWMI, same mods** - your WWMI and `Mods` folders as they are, nothing to convert
+- **Same WWMI, same mods** - your WWMI and `Mods` folders as they are, nested folders included, nothing
+  to convert
 - **Some mods broken on DX11 work here**
 - **DirectX 11 untouched** - XXMI works as before; the add-on sleeps whenever the game runs DX11
 - **Other ReShade add-ons** - may work alongside; RenoDX is confirmed
 - **One-click launcher** and a **one-checkbox debug log** for bug reports
+- **Stops instead of freezing** - if the add-on hits an error, it switches itself off until the game
+  restarts and says so, instead of taking the game down
 
 ## What it can't do yet
 
 - **Ray tracing** - with it on, the add-on switches itself off and says so
-- **UHD resources** - with the game's UHD resources installed, many mod textures stay vanilla: UHD ships
-  the game's textures re-encoded, under hashes no mod lists. HD resources work.
 - **Constant buffer regions** - binding part of a buffer as a constant buffer
   (`vs-cb0 = ref ResourceFoo->Region($offset, $size)`, XXSetConstantBuffers1) is skipped and logged once;
   no WWMI mod is known to use it
@@ -100,18 +104,27 @@ with a `wwmi-dx12` window showing "Active mods" above 0.
 | Debug log / level | writes `<Win64>\wwmi_dx12_addon.log`; off by default, saved to `wwmi_dx12.ini` |
 | Decensor | saved to `wwmi_dx12.ini` |
 | Load mod textures in the background | on (default): no stutter, textures pop in a moment later. Off: textures from the first frame, after a short pause |
-| Use look-alike texture matches | off by default (see Texture matches); saved to `wwmi_dx12.ini` |
+| Use look-alike texture matches | on by default (see Texture matches); saved to `wwmi_dx12.ini` |
 | Use texture match cache | on by default; off: no texture matches are learned, read or saved (see Texture matches) |
 | Reload mods | re-reads every mod ini (untested) |
 | Clear caches at next launch | rebuilds saved shader patches and texture matches; try it if mods look wrong after an update |
 
 ## Texture matches
 
-At a distance the game draws lower-resolution copies of a texture, under hashes no mod lists. The add-on
-matches each copy to its full-size texture from the game's own data, the first time both load (a
-character's screen loads them), and keeps the match in `<Win64>\wwmi_dx12\cache\lod_tex_cache.lodcache`.
-The package brings a seed of matches already learned (`wwmi_dx12\cache\seed-<version>.lodcache`), taken in
-at the first start like a shared file.
+The game often draws a texture under a hash no mod lists: a lower-resolution copy at a distance, the UHD
+resources' re-encoded textures, or a texture a client update changed. The add-on matches such a texture
+to the one the mod was made for:
+
+- **By its mips** - a lower mip of a known texture is the same image, a proven match. Learned the first
+  time both load (a character's screen loads them).
+- **By its look** - a visual fingerprint of five small patches, compared with a histogram and SSIM
+  (structural similarity) against fingerprints taken from the HD textures.
+- **By its place** - the HD character gallery was sampled for which texture each character draws where;
+  a texture drawn in the same place is matched to it.
+
+Matches are kept in `<Win64>\wwmi_dx12\cache` (`lod_tex_cache.lodcache`, `tex_look.bin`). The package
+brings seeds of what was already learned (`wwmi_dx12\cache\seed-<version>.lodcache` and
+`seed-<version>.texlook`), taken in at the first start like a shared file.
 
 - **Sharing** - any other `.lodcache` file put in that folder is taken in at the next start, then renamed
   `DISABLED_<date>_<name>`. Only proven matches are taken; where one disagrees with yours, yours stays, or
@@ -119,9 +132,9 @@ at the first start like a shared file.
   `lod_tex_cache.lodcache` under another name (the receiver already has a file by that name).
 - **Turning it off** - untick **Use texture match cache**: nothing is learned, read or saved, and distant
   copies stay vanilla.
-- **Look-alike matches** (window option, off by default) - copies that only look like a mod's texture get
-  it too, in that mod's own draws. Of those that could be checked, about 1 in 8 was wrong, so it stays off
-  unless a mod's distant textures stay vanilla and you accept the odd wrong one.
+- **Look-alike matches** (window option, on by default) - matches by look or by place, which can't be
+  proven from the game's data. Untick it if a texture looks wrong: only proven matches are used then, and
+  UHD textures mostly stay vanilla.
 
 ## Performance
 
@@ -132,9 +145,10 @@ at the first start like a shared file.
 ## Plans
 
 - **Ray tracing**, next.
-- **UHD resources** - recognising a texture by how it looks rather than by its hash, so mods work on
-  UHD too.
-- Performance, where it can still move.
+- **Performance** - less CPU work per modded draw, and video-memory management so mod buffers and
+  textures stay resident without pushing the game's own data out.
+- **Performance-tracking builds** - a build with the profiler included, so a frame-cost report can be sent
+  from your own setup along with the logs.
 - **Easier setup** - a streamlined install and a better launcher.
 - **Shared texture matches** - an automatically updated seed of learned texture matches, so mods look
   right on first launch. Sharing a file by hand works already (see Texture matches).

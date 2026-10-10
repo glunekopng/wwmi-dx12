@@ -41,9 +41,17 @@ jobs:
           name: wwmi-dx12
           path: build_addon/release/*.zip
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wwmi-dx12-map
+          path: build_addon/wwmi_dx12.map
+
       - name: Attach the zip to the release
         if: startsWith(github.ref, 'refs/tags/')
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create $env:GITHUB_REF_NAME (Get-Item build_addon/release/*.zip).FullName --title $env:GITHUB_REF_NAME --generate-notes
+        run: |
+          $map = "build_addon/release/wwmi_dx12-$($env:GITHUB_REF_NAME.TrimStart('v')).map"
+          Copy-Item build_addon/wwmi_dx12.map $map
+          gh release create $env:GITHUB_REF_NAME (Get-Item build_addon/release/*.zip).FullName $map --title $env:GITHUB_REF_NAME --generate-notes

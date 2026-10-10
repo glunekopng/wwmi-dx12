@@ -19,7 +19,7 @@ thread_local uint8_t  t_x23_merges = 0;
 bool on_draw_indexed_body(command_list* cmd_list, uint32_t index_count, uint32_t instance_count, uint32_t first_index, int32_t vertex_offset, uint32_t first_instance)
 {
     PROF(PROF_DrawIndexed);
-    if (g_addon_disabled || !g_is_dx12) return false;
+    if (g_addon_disabled || g_faulted || !g_is_dx12) return false;
     MigotoPort::FrameAnalysisDrawScope fa_scope;
     uint64_t                           vs_hash = 0;
     cmd_list->get_private_data(s_iid_vs_hash, &vs_hash);
@@ -37,6 +37,7 @@ bool on_draw_indexed_body(command_list* cmd_list, uint32_t index_count, uint32_t
         first_instance, vs_hash, draw_rt };
 
     if (g_debug) ShaderDiffNote(cmd_list, vs_hash, index_count);
+    NoteMeshPlaces(args);
 
     if (index_count >= 256 && logger::enabled(3)) { // feeds only the SEEDHB trace line
         uint64_t hbvb0 = 0;

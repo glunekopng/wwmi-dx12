@@ -189,7 +189,7 @@ static void CollectBoundModTexHashes(command_list* cmd_list, uint32_t* out, int 
         uint32_t        hs[kTexScanMax];
         const uint32_t  maxS = ResolveBoundTextures(ts.heap, ts.base, num, res, hs, scan_len[p]);
         for (uint32_t s = 0; s < maxS; ++s) {
-            const uint32_t h = !hs[s] || tr.targets.count(hs[s]) ? hs[s] : TexLodTargetOf(hs[s], nullptr);
+            const uint32_t h = !hs[s] || tr.targets.count(hs[s]) ? hs[s] : TexLodTargetOf(hs[s]);
             if (h && tr.targets.count(h)) {
                 if (n < cap) out[n++] = h;
                 if (n >= cap) return;

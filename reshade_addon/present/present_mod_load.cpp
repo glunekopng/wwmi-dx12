@@ -15,23 +15,14 @@ static void WwmiBannerTick()
     const unsigned  gen = PortApi::LoadGeneration();
     if (s_done_gen == gen) return;
     s_done_gen = gen;
+    const wchar_t* const        fq = L"resource\\wwmiv1\\versionnotification";
     PortApi::BufferResourceInfo bi{};
-    if (!PortApi::GetBufferResource(L"resource\\wwmiv1\\versionnotification", &bi) || !bi.dx12) {
+    if (!PortApi::GetBufferResource(fq, &bi) || !bi.dx12) {
         logger::write("BANNER: WWMI's VersionNotification buffer not found -- its banner stays as shipped");
         return;
     }
-    if (!bi.mappable) {
-        logger::write("BANNER: VersionNotification is not CPU-mappable -- its banner stays as shipped");
-        return;
-    }
-    void*             p = nullptr;
-    const D3D12_RANGE all{ 0, bi.byte_width };
-    if (FAILED(bi.dx12->Map(0, &all, &p)) || !p) {
-        logger::write("BANNER: Map failed");
-        return;
-    }
     char shipped[64] = {};
-    memcpy(shipped, p, (std::min)((size_t)bi.byte_width, sizeof shipped - 1));
+    PortApi::BufferInitialData(fq, shipped, (std::min)((size_t)bi.byte_width, sizeof shipped - 1));
     size_t k = 0;
     if (strncmp(shipped, "WWMI ", 5) == 0)
         for (k = 5; shipped[k] && shipped[k] != ' ' && shipped[k] != '\n';) ++k;
@@ -40,15 +31,15 @@ static void WwmiBannerTick()
     snprintf(text, sizeof text, "%s\nWWMI-DX12 %s", k ? shipped : "WWMI", WWMI_VERSION);
     const size_t n = strlen(text);
     if (bi.byte_width < n) {
-        const D3D12_RANGE none{ 0, 0 };
-        bi.dx12->Unmap(0, &none);
         logger::write("BANNER: VersionNotification is %u B -- '%s' (%zu B) not written", bi.byte_width, text, n);
         return;
     }
-    memset(p, 0, bi.byte_width);
-    memcpy(p, text, n);
-    const D3D12_RANGE wrote{ 0, bi.byte_width };
-    bi.dx12->Unmap(0, &wrote);
+    std::vector<char> data(bi.byte_width, 0);
+    memcpy(data.data(), text, n);
+    if (!PortApi::UploadBufferResource(fq, data.data(), data.size())) {
+        logger::write("BANNER: upload failed -- its banner stays as shipped");
+        return;
+    }
     logger::write("BANNER: WWMI's startup banner now reads '%s' / 'WWMI-DX12 %s'", k ? shipped : "WWMI", WWMI_VERSION);
 }
 
@@ -61,10 +52,9 @@ void ModTexturesTick()
         if (ModLoader::TexResources().size() > described) TexRetryMissed("new mod textures described");
     }
     if (!g_texovr_ready) {
-        ModLoader::LoadTextureOverrides(); // mod-folder discovery only; the engine parses the inis
+        PortApi::Load(g_wwmi_dir.c_str());
+        ModLoader::LoadTextureOverrides(); // the SRV heap, sized from what their engine declared
         {
-            const std::wstring wcl_ini_root = fs::path(g_mods_dir).parent_path().wstring();
-            PortApi::Load(wcl_ini_root.c_str());
             {
                 const unsigned h = PortApi::GameConstantBufferHash(kDx11SkeletonCbByteWidth);
                 logger::write("PORT-LEAF skeleton CB: ByteWidth=%u -> hash=%08x %s", kDx11SkeletonCbByteWidth,
@@ -87,7 +77,7 @@ void ModTexturesTick()
 
 void LoadGeometryMods()
 {
-    if (g_wwmi_geom && !g_geom_loaded && g_d3d12_device && !g_mods_dir.empty()) {
+    if (g_wwmi_geom && !g_geom_loaded && g_d3d12_device && !g_wwmi_dir.empty()) {
         for (auto& dm : ModLoader::EnumerateMods()) {
             struct ObjGroup {
                 std::wstring              ns;
@@ -95,18 +85,12 @@ void LoadGeometryMods()
             };
             std::vector<ObjGroup> groups;
             for (auto& ini : dm.inis) {
-                wchar_t ns_buf[512] = {};
-                if (!PortApi::NamespaceForIni(ini.c_str(), ns_buf, std::size(ns_buf)) || !ns_buf[0]) {
-                    logger::write("WwmiGeom: SKIP '%ls' -- their engine has no namespace for it", ini.c_str());
-                    continue;
-                }
-                const std::wstring ns = ns_buf;
-                auto               git = std::find_if(groups.begin(), groups.end(),
-                    [&](const ObjGroup& g) { return g.ns == ns; });
+                auto git = std::find_if(groups.begin(), groups.end(),
+                    [&](const ObjGroup& g) { return g.ns == ini.ns; });
                 if (git == groups.end())
-                    groups.push_back({ ns, { ini } });
+                    groups.push_back({ ini.ns, { ini.path } });
                 else
-                    git->inis.push_back(ini);
+                    git->inis.push_back(ini.path);
             }
             if (groups.empty()) continue;
             {
@@ -193,6 +177,22 @@ void LoadGeometryMods()
                 g_ibhash_slot.emplace(wc->ib_hash, (int)i);
             if (mc.mod_id >= 0 && mc.mod_id < (int)g_mod_index_end.size())
                 g_mod_index_end[mc.mod_id] = (std::max)(g_mod_index_end[mc.mod_id], mc.first_index + mc.match_count);
+        }
+        for (MergedComp& mc : g_merged_comps) mc.with.clear();
+        for (const auto& kv : g_first_to_shared) {
+            for (const int a : kv.second) {
+                const WwmiMod::Component* ca = WmodComp(g_merged_comps[a].mod_id, g_merged_comps[a].comp_idx);
+                if (!ca || !ca->ib_hash) continue;
+                for (const int b : kv.second) {
+                    const WwmiMod::Component* cb = WmodComp(g_merged_comps[b].mod_id, g_merged_comps[b].comp_idx);
+                    if (b != a && cb && cb->ib_hash == ca->ib_hash) g_merged_comps[a].with.push_back(b);
+                }
+                if (a == kv.second.front() && !g_merged_comps[a].with.empty())
+                    logger::write("WwmiGeom: hash=%08x first=%u count=%u is declared by %zu mods -- every one's section runs "
+                                  "on its draw, as on DX11",
+                        ca->ib_hash, g_merged_comps[a].first_index, g_merged_comps[a].match_count,
+                        g_merged_comps[a].with.size() + 1);
+            }
         }
         if (!g_geomods.empty()) FinalizeMergedRemap(); // one-time shared setup + g_merged_loaded
         g_geom_loaded = true;

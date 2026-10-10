@@ -5,8 +5,8 @@
 #include "tex_lod.h"
 #include "../instrumentation/removal_pin.h"
 #include "../config.h"
-#include "../addon_core.h"      // g_mods_dir
 #include "../migoto/port_api.h" // their [TextureOverride*] dispatch and [Resource*] registry
+#include "tex_crawl.h"
 #include "../mods/ib_hash.h"    // ForgetRange: a whole-buffer copy replaces the mesh hashes inside it
 #include "../instrumentation/profiler.h"
 #include "../addon_state.h" // g_res_to_slot / HeapKey (late re-stamp slot map)
@@ -200,11 +200,9 @@ uint32_t TexRuleHashFor(uint32_t hash)
     const uint32_t tgt = TexLodLookup(hash);
     return (tgt && tr.hash_to_rule.find(tgt) != tr.hash_to_rule.end()) ? tgt : 0;
 }
-uint32_t TexLodTargetOf(uint32_t hash, const wchar_t* ns)
+uint32_t TexLodTargetOf(uint32_t hash)
 {
-    if (!hash) return 0;
-    const uint32_t tgt = TexLodLookup(hash);
-    return tgt || !ns ? tgt : TexLodLookupOwned(hash, ns, &PortApi::TextureOverrideInNs);
+    return hash ? TexLodLookup(hash) : 0;
 }
 uint32_t ResolveBoundTextures(uint64_t heap, uint32_t base, uint32_t num, ID3D12Resource** res, uint32_t* hash,
     uint32_t cap, const std::bitset<512>* want)
@@ -618,23 +616,17 @@ void TexRulesPublish()
             c->tr->targets.insert(hash);
         },
         &ctx);
-    const size_t    from_sections = tr->targets.size();
-    std::error_code ec;
-    if (!g_mods_dir.empty())
-        for (auto& mod : fs::directory_iterator(g_mods_dir, ec)) {
-            if (!mod.is_directory()) continue;
-            if (ModLoader::IsExcludedEntry(mod.path().filename().c_str())) continue;
-            auto            tdir = mod.path() / L"Textures";
-            std::error_code ec2;
-            if (!fs::exists(tdir, ec2)) continue;
-            for (auto& f : fs::directory_iterator(tdir, ec2)) {
-                std::wstring nm = f.path().filename().wstring();
-                auto         pos = nm.find(L"t=");
-                if (pos == std::wstring::npos) continue;
-                uint32_t h = (uint32_t)wcstoul(nm.c_str() + pos + 2, nullptr, 16);
-                if (h) tr->targets.insert(h);
-            }
-        }
+    const size_t from_sections = tr->targets.size();
+    PortApi::ForEachCustomResource(
+        [](const wchar_t*, const wchar_t* filename, int, bool, ID3D12Resource*, void* user) {
+            const fs::path     f = filename ? filename : L"";
+            const std::wstring nm = f.filename().wstring();
+            const size_t       pos = nm.find(L"t=");
+            if (pos == std::wstring::npos || _wcsicmp(f.parent_path().filename().c_str(), L"Textures") != 0) return;
+            const uint32_t h = (uint32_t)wcstoul(nm.c_str() + pos + 2, nullptr, 16);
+            if (h) static_cast<TexRules*>(user)->targets.insert(h);
+        },
+        tr);
     static std::vector<const TexRules*> s_retired;
     if (const TexRules* old = g_tex_rules.exchange(tr, std::memory_order_acq_rel)) s_retired.push_back(old);
     std::string s;
@@ -903,11 +895,26 @@ void TexMipIdentityFromUpload(ID3D12Resource* dest, uint32_t sub, const uint8_t*
     }
     const uint32_t rule = TexRuleHashFor(h0);
     if (rule) g_ts_mipk_target.fetch_add(1, std::memory_order_relaxed);
-    if (rule && id != rule && id != h0) MipExactRecord(dest, sub, id, rule);
+    const uint32_t high = rule ? rule : TexCrawlOn() ? h0 : 0;
+    if (high && id != high && id != h0) MipExactRecord(dest, sub, id, high);
     DumpIfDegenerate(id, tight, L, fmt, sub, rule ? rule : h0);
 }
 
 TexLodWorker g_tex_lod_worker;
+
+void TexLookAlikesSwitched(bool on)
+{
+    std::vector<uint64_t> carriers;
+    {
+        std::shared_lock l(g_tex_mutex);
+        for (const auto& kv : g_res_texhash)
+            if (TexLodLinked(kv.second) && !TexLodKnown(kv.second)) carriers.push_back(kv.first);
+    }
+    unsigned changed = 0;
+    for (uint64_t r : carriers) changed += on ? RestampResource(r) : UnstampResource(r, false);
+    logger::write("TexLod: A13 %s -- %zu resident(s) carry a look-alike, %u slot(s) %s", on ? "on" : "off", carriers.size(),
+        changed, on ? "now hold the mod texture" : "given back to the game");
+}
 
 void TexLodWorker::Run()
 {
@@ -918,18 +925,20 @@ void TexLodWorker::Run()
             if (!cv_.wait_for(l, std::chrono::seconds(1), [this] { return stop_ || !queue_.empty(); })) {
                 l.unlock();
                 TexLodFlushIfQuiet(2000);
+                TexCrawlFlushIfQuiet(10000);
+                TexLookFlushIfQuiet(10000);
                 continue;
             }
             if (stop_) return;
             j = std::move(queue_.front());
             queue_.pop_front();
         }
-        const bool known_before = TexLodKnown(j.crc) != 0;
+        const bool known_before = TexLodKnown(j.crc) || TexLodLookup(j.crc);
         {
             PROF(PROF_CB_TexLod);
-            TexLodOnSample(j.crc, j.sample, j.w, j.h, j.fmt, j.is_target);
+            TexLookOnCut(j.crc, j.cut, j.is_target);
         }
-        if (known_before || !TexLodKnown(j.crc)) continue;
+        if (known_before || !(TexLodKnown(j.crc) || TexLodLookup(j.crc))) continue;
         const uint64_t key = reinterpret_cast<uint64_t>(j.dest);
         bool           still = false;
         {
@@ -956,18 +965,19 @@ void TexLodWorker::Stop()
 }
 
 void TexLodWorker::Queue(ID3D12Resource* dest, uint32_t crc, uint32_t w, uint32_t h, uint32_t fmt, bool is_target,
-    std::vector<uint8_t>&& bc)
+    const std::vector<uint8_t>& bc)
 {
-    if (!g_texlod_cache || !DxgiIsBc(fmt) || (uint64_t)w * h < 256ull * 256ull) return; // the LOD record's own first test
+    if (!TexLookWants(crc, w, h, fmt, is_target)) return; // decided for this content already
     {
         std::lock_guard l(mtx_);
         if (stop_) return;
     }
-    std::vector<uint8_t> sample = TexLodSampleOf(bc.data(), bc.size(), w, h, fmt); // 3 KB queued, not the whole mip
+    TexLookCut cut = TexLookCutOf(bc.data(), bc.size(), w, h, fmt); // the patches' blocks queued, not the whole mip
+    if (cut.blocks.empty()) return;
     {
         std::lock_guard l(mtx_);
         if (stop_) return;
-        queue_.push_back(Job{ dest, crc, w, h, fmt, is_target, std::move(sample) });
+        queue_.push_back(Job{ dest, crc, is_target, std::move(cut) });
         if (!thread_.joinable()) thread_ = std::thread(&TexLodWorker::Run, this);
     }
     cv_.notify_one();
@@ -1032,8 +1042,8 @@ void TexHashFromUpload(ID3D12Resource* dest, const uint8_t* src, size_t src_row_
     DumpIfDegenerate(crc, tight, L, fmt, 0, 0);
     const TexRules& tr = TexRulesNow();
     bool            tex_is_target = tr.hash_to_rule.count(crc) != 0;
-    g_tex_lod_worker.Queue(dest, crc, w, h, fmt, tex_is_target, std::move(tight));
-    if (tex_is_target || tr.targets.count(crc) || TexLodKnown(crc)) {
+    g_tex_lod_worker.Queue(dest, crc, w, h, fmt, tex_is_target, tight);
+    if (tex_is_target || tr.targets.count(crc) || TexLodKnown(crc) || TexLodLookup(crc)) {
         std::lock_guard l(g_tex_mutex);
         g_modtex_res.insert(reinterpret_cast<uint64_t>(dest));
     }
@@ -1069,12 +1079,13 @@ void TexHashFromUpload(ID3D12Resource* dest, const uint8_t* src, size_t src_row_
             g_feed_pending.erase(it);
         }
     }
-    for (const auto& e : fed) TexLodFeeds(e.first, crc, tex_is_target ? crc : 0, e.second);
+    for (const auto& e : fed) TexLodFeeds(e.first, crc, tex_is_target || TexCrawlOn() ? crc : 0, e.second);
     if (!held.empty()) {
         const uint32_t rule = TexRuleHashFor(crc);
-        if (rule)
+        const uint32_t high = rule ? rule : TexCrawlOn() ? crc : 0;
+        if (high)
             for (const auto& m : held)
-                if (m.second != rule && m.second != crc) MipExactRecord(dest, m.first, m.second, rule);
+                if (m.second != high && m.second != crc) MipExactRecord(dest, m.first, m.second, high);
     }
     if (tex_is_target) {                                          // TEXSTREAM: this resource is a rule target as uploaded -- its mips past the floor
         g_ts_target_mip0.fetch_add(1, std::memory_order_relaxed); // should each leave a record
@@ -1119,11 +1130,12 @@ static void DiagTexPath(const char* path, ID3D12Resource* dest, ID3D12Resource* 
         path, (void*)dest, (uint32_t)d.Width, d.Height, (uint32_t)d.Format, srcHeap);
 }
 
-static void PropagateTexLineage(uint64_t srcH, uint64_t dstH)
+static void PropagateTexLineage(uint64_t srcH, uint64_t dstH, bool same_image)
 {
     if (!g_tex_lineage || srcH == dstH) return;
     const uint32_t shash = TexHashOf(srcH);
-    if (!TexRuleHashFor(shash)) return; // src is not (a LOD of) a mod target
+    const uint32_t rule = TexRuleHashFor(shash);
+    if (!shash || (!rule && !same_image)) return; // a copy holding its source's image (whole, or streamed down) is that texture, target or not
     bool tagged = false;
     {
         std::lock_guard l(g_tex_mutex);
@@ -1137,7 +1149,7 @@ static void PropagateTexLineage(uint64_t srcH, uint64_t dstH)
             tagged = true;
         }
     }
-    if (tagged) RestampResource(dstH);
+    if (tagged && rule) RestampResource(dstH);
 }
 
 static void LineageAlias(uint64_t smallerH, uint64_t biggerH, uint32_t steps)
@@ -1152,7 +1164,7 @@ static void LineageAlias(uint64_t smallerH, uint64_t biggerH, uint32_t steps)
         return;
     }
     const bool known_before = TexLodKnown(sId) != 0;
-    TexLodFeeds(sId, bId, TexRulesNow().hash_to_rule.count(bId) ? bId : 0, steps);
+    TexLodFeeds(sId, bId, TexRulesNow().hash_to_rule.count(bId) || TexCrawlOn() ? bId : 0, steps);
     if (!known_before && TexLodKnown(sId)) RestampResource(smallerH); // recognised now -> re-fire its placement swap
 }
 
@@ -1191,7 +1203,7 @@ bool on_copy_texture_region(command_list* cl, resource source, uint32_t src_sub,
             if ((big.Width >> steps) != sm.Width || (big.Height >> steps) != sm.Height) steps = 0;
             g_ts_stream.fetch_add(1, std::memory_order_relaxed);
             if (!TexHashOf(dst_smaller ? source.handle : dest.handle)) g_ts_stream_nobig.fetch_add(1, std::memory_order_relaxed);
-            PropagateTexLineage(source.handle, dest.handle); // tag the fresh variant (the chain)
+            PropagateTexLineage(source.handle, dest.handle, dst_smaller); // tag the fresh variant (the chain)
             if (dst_smaller)
                 LineageAlias(dest.handle, source.handle, steps);
             else
@@ -1226,6 +1238,7 @@ bool on_copy_texture_region(command_list* cl, resource source, uint32_t src_sub,
     }
     if (src_sub != 0 || dest_subresource != 0 || src_box || dst_box) return false; // full mip0->mip0 only
     if (!dimsEq) return false;                                                     // identical mip0
+    PropagateTexLineage(source.handle, dest.handle, true);
     if (already || !profMatch) return false;
 
     auto* dev = reinterpret_cast<ID3D12Device*>(cl->get_device()->get_native());
@@ -1349,7 +1362,7 @@ bool on_copy_resource(command_list*, resource source, resource dest)
         D3D12_RESOURCE_DESC dd = d->GetDesc();
         TexAssetLayout      L; // the same assets the hash covers (on_copy_texture_region's test), not BC only
         if (TexAssetLayoutOf(dd, 0, L) && L.floor && s->GetDesc().Format == dd.Format)
-            PropagateTexLineage(source.handle, dest.handle);
+            PropagateTexLineage(source.handle, dest.handle, true);
     }
     DiagTexPath("copy_resource", reinterpret_cast<ID3D12Resource*>(dest.handle),
         reinterpret_cast<ID3D12Resource*>(source.handle), 0);
@@ -1384,7 +1397,7 @@ bool on_copy_buffer_to_texture(command_list* cl, resource source, uint64_t sourc
     if (dest_subresource != 0) {
         // Only a target's mips are worth a map: a known mip0 that is no rule hash and no alias is nothing.
         const uint32_t h0 = TexHashOf(reinterpret_cast<uint64_t>(dst));
-        if (h0 && !TexRuleHashFor(h0)) return false;
+        if (h0 && !TexRuleHashFor(h0) && !TexCrawlOn()) return false;
     }
     void*   ptr = nullptr;
     HRESULT map_hr;

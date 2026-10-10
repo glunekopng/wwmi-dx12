@@ -107,6 +107,12 @@ bool InjectClaimedDraw(const DrawArgs& da, DrawClaim& dc)
                             mc->comp_idx, game_cb13_root, psh, (int)(wc && wc->remapped), (int)drew);
                     }
                 }
+                for (const int s : mc->with) {
+                    const MergedComp& co = g_merged_comps[s];
+                    if (co.vanilla || co.hide) continue;
+                    if (drew) restore_state();
+                    drew = draw_comp(co.mod_id, WmodComp(co.mod_id, co.comp_idx)) || drew;
+                }
                 if (drew) {
                     restore_state();
                     return true;

@@ -16,14 +16,15 @@ constexpr uint32_t kMaxBones = 256;
 constexpr uint32_t kBoneCBBytes = kMaxBones * kBoneStride; // 12288
 
 struct MergedComp {
-    int      mod_id = 0; // which geometry mod (index into g_geomods) owns this component
-    int      comp_idx = -1;
-    uint32_t first_index = 0; // game match_first_index
-    uint32_t match_count = 0; // game match_index_count -- disambiguates (first_index alone collides)
-    int      remap_size = 0;  // # of local bones in this component's RemappedSkeleton
-    bool     hide = false;
-    bool     vanilla = false;
-    bool     freeze = false;
+    int              mod_id = 0; // which geometry mod (index into g_geomods) owns this component
+    int              comp_idx = -1;
+    uint32_t         first_index = 0; // game match_first_index
+    uint32_t         match_count = 0; // game match_index_count -- disambiguates (first_index alone collides)
+    int              remap_size = 0;  // # of local bones in this component's RemappedSkeleton
+    bool             hide = false;
+    bool             vanilla = false;
+    bool             freeze = false;
+    std::vector<int> with; // other mods' components on this range of the same mesh: their sections run on its draw too
 };
 inline std::vector<MergedComp>                        g_merged_comps;
 inline std::unordered_map<uint64_t, int>              g_first_to_comp;

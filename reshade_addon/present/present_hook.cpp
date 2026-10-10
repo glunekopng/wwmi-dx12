@@ -9,21 +9,21 @@
 #include "present_parts.h"
 #include "../instrumentation/device_watch.h"
 #include "../config.h"     // g_skip_engine_tick (A9)
-#include "../ui/overlay.h" // DrawRtBlockedNotice
+#include "../ui/overlay.h" // DrawStoppedNotice
 
 void on_present_body(command_queue* queue, swapchain* sc)
 {
     ProfFrameEnd(); // snapshot+reset LAST frame's accumulators (also measures full frame wall time)
     SampleMemoryOncePerSecond();
     PROF(PROF_Present);
-    if (g_rt_blocked) {
+    if (g_rt_blocked || g_faulted) {
         static ULONGLONG s_notice_until = 0;
         if (!g_addon_disabled) SetAddonDisabled(true);
         if (!s_notice_until) {
-            reshade::register_overlay("OSD", DrawRtBlockedNotice);
+            reshade::register_overlay("OSD", DrawStoppedNotice);
             s_notice_until = GetTickCount64() + 60000;
         } else if (s_notice_until != ~0ull && GetTickCount64() > s_notice_until) {
-            reshade::unregister_overlay("OSD", DrawRtBlockedNotice);
+            reshade::unregister_overlay("OSD", DrawStoppedNotice);
             s_notice_until = ~0ull;
         }
     }
@@ -33,7 +33,7 @@ void on_present_body(command_queue* queue, swapchain* sc)
         if (HWND fg = GetForegroundWindow()) GetWindowThreadProcessId(fg, &pid);
         const bool mods = ((GetAsyncKeyState(VK_SHIFT) | GetAsyncKeyState(VK_CONTROL) | GetAsyncKeyState(VK_MENU)) & 0x8000) != 0;
         const bool f6 = pid == GetCurrentProcessId() && !mods && (GetAsyncKeyState(VK_F6) & 0x8000) != 0;
-        if (f6 && !s_f6 && !g_rt_blocked) SetAddonDisabled(!g_addon_disabled.load());
+        if (f6 && !s_f6 && !g_rt_blocked && !g_faulted) SetAddonDisabled(!g_addon_disabled.load());
         s_f6 = f6;
     }
     VerboseTick();

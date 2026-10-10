@@ -14,8 +14,10 @@
 #include "instrumentation/device_watch.h" // DredWatchdogStop
 #include "rabbitfx/pso_blend.h"           // RfxPatchWorkerStop
 #include "textures/texture_module.h"      // g_tex_lod_worker
+#include "textures/tex_crawl.h"
 #include "textures/tex_eager.h"
 #include "migoto/dx12_wrap.h" // BackBufferForget
+#include "migoto/port_toggles.h" // g_buffers_in_vram
 #include "instrumentation/removal_pin.h"
 #include "instrumentation/hot_path.h"
 #include "draw/draw_hook.h"
@@ -51,7 +53,7 @@ static void __stdcall OnDebugLayerMessage(
 extern HINSTANCE migoto_handle;
 
 // Mods directory, set in ActivateD3D12.
-std::wstring g_mods_dir;
+std::wstring g_wwmi_dir;
 
 static void on_destroy_swapchain(swapchain*, bool resize)
 {
@@ -71,7 +73,9 @@ static void on_destroy_device(device*)
     RfxPatchWorkerStop(); // it creates PSOs on this device
     g_heap_to_res.unwatch_all();
     g_tex_lod_worker.Stop();
+    TexCrawlFlushIfQuiet(0);
     TexLodOnExit();
+    TexLookOnExit();
     g_tex_eager.Stop();
     PortApi::SaveSettingsOnExit();
 }
@@ -125,6 +129,24 @@ static void on_init_device(device* dev)
 
 extern "C" __declspec(dllexport) const char* NAME = "wwmi-dx12";
 extern "C" __declspec(dllexport) const char* DESCRIPTION = "Wuthering Waves Mod Importer (DX12)";
+
+// The patched shaders of a build from before cache\shaders, moved there; how many.
+static unsigned MoveShaderCache(const std::wstring& from, const std::wstring& to)
+{
+    std::vector<std::wstring> names;
+    WIN32_FIND_DATAW          fd;
+    const HANDLE              h = FindFirstFileW((from + L"\\*.rfx*").c_str(), &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) names.emplace_back(fd.cFileName);
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    unsigned moved = 0;
+    for (const std::wstring& n : names)
+        moved += MoveFileExW((from + L"\\" + n).c_str(), (to + L"\\" + n).c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
+    return moved;
+}
 
 static bool on_draw_indexed_guarded(command_list* cmd_list, uint32_t index_count, uint32_t instance_count,
     uint32_t first_index, int32_t vertex_offset, uint32_t first_instance)
@@ -318,23 +340,15 @@ static void ActivateD3D12()
         if (n && (wwmi_dir_buf[n - 1] == L'\\' || wwmi_dir_buf[n - 1] == L'/')) wwmi_dir_buf[n - 1] = 0;
     }
     if (wwmi_dir_buf[0]) {
-        const std::wstring d3dx_ini = std::wstring(wwmi_dir_buf) + L"\\d3dx.ini";
-        wchar_t            mods_rel[MAX_PATH] = {};
-        GetPrivateProfileStringW(L"Include", L"include_recursive", L"Mods", mods_rel, MAX_PATH,
-            d3dx_ini.c_str());
-        {
-            std::wstring t(mods_rel);
-            size_t       e = t.find_last_not_of(L" \t");
-            t = (e == std::wstring::npos) ? L"Mods" : t.substr(0, e + 1);
-            wcsncpy_s(mods_rel, t.c_str(), _TRUNCATE);
-        }
-
-        std::wstring mods_dir = std::wstring(wwmi_dir_buf) + L"\\" + mods_rel;
         MigotoPort::SetDumpDir((std::wstring(wwmi_dir_buf) + L"\\DX12_Dumps").c_str()); // every capture's root
-        const std::wstring cache_dir = s_win64 + L"wwmi_dx12\\cache";
-        CreateDirectoryW((s_win64 + L"wwmi_dx12").c_str(), nullptr);
+        g_data_dir = s_win64 + L"wwmi_dx12";
+        const std::wstring cache_dir = g_data_dir + L"\\cache";
+        CreateDirectoryW(g_data_dir.c_str(), nullptr);
         CreateDirectoryW(cache_dir.c_str(), nullptr);
-        g_shader_cache_dir = cache_dir;
+        g_shader_cache_dir = cache_dir + L"\\shaders";
+        CreateDirectoryW(g_shader_cache_dir.c_str(), nullptr);
+        if (const unsigned moved = MoveShaderCache(cache_dir, g_shader_cache_dir))
+            ::logger::write("Config: %u cached shader patch(es) moved into %S", moved, g_shader_cache_dir.c_str());
         if (GetPrivateProfileIntW(L"wwmi-dx12", L"clear_cache", 0, g_addon_ini_path.c_str()) != 0) {
             unsigned         shaders = 0;
             WIN32_FIND_DATAW fd;
@@ -350,12 +364,12 @@ static void ActivateD3D12()
             ::logger::write("Config: clear_cache=1 -- removed %u cached shader patch(es) and %s texture match cache",
                 shaders, lod ? "the" : "no");
         }
-        g_mods_dir = mods_dir;
-        ModLoader::SetDir(mods_dir.c_str());
+        g_wwmi_dir = wwmi_dir_buf;
         ModLoader::Reload(); // deferred -- executes on first Tick() after device init
         TexLodInit(cache_dir);
-        ::logger::write("Config: wwmi_dir=%S  mods_dir=%S (include_recursive='%S' from d3dx.ini)",
-            wwmi_dir_buf, mods_dir.c_str(), mods_rel);
+        TexLookInit(cache_dir);
+        ::logger::write("Config: wwmi_dir=%S (their engine reads d3dx.ini there, and every mod it includes)",
+            wwmi_dir_buf);
     } else {
         ::logger::write("Config: wwmi_dx12.ini not found or wwmi_dir not set (looked at %S)", g_addon_ini_path.c_str());
     }
@@ -488,10 +502,11 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE)
     g_hide_outline = GetPrivateProfileIntW(L"wwmi-dx12", L"hide_outline", 0, ini_path.c_str()) != 0;
 #endif
     g_tex_deferred = GetPrivateProfileIntW(L"wwmi-dx12", L"tex_background", 1, ini_path.c_str()) != 0;
-    g_texlod_resemblance = GetPrivateProfileIntW(L"wwmi-dx12", L"lod_resemblance", 0, ini_path.c_str()) != 0;
+    g_texlod_resemblance = GetPrivateProfileIntW(L"wwmi-dx12", L"lod_resemblance", 1, ini_path.c_str()) != 0;
     g_texlod_cache = GetPrivateProfileIntW(L"wwmi-dx12", L"lod_cache", 1, ini_path.c_str()) != 0;
-    ::logger::write("Config: decensor=%d lod_resemblance=%d lod_cache=%d", (int)g_decensor, (int)g_texlod_resemblance,
-        (int)g_texlod_cache);
+    MigotoPort::g_buffers_in_vram = GetPrivateProfileIntW(L"wwmi-dx12", L"buffers_in_vram", 1, ini_path.c_str()) != 0;
+    ::logger::write("Config: decensor=%d lod_resemblance=%d lod_cache=%d buffers_in_vram=%d", (int)g_decensor,
+        (int)g_texlod_resemblance, (int)g_texlod_cache, (int)MigotoPort::g_buffers_in_vram);
     if (g_dx12_debug_layer) {
         ID3D12Debug*  dbg = nullptr;
         const HRESULT hrd = D3D12GetDebugInterface(IID_PPV_ARGS(&dbg));
@@ -563,7 +578,9 @@ extern "C" __declspec(dllexport) void AddonUninit(HMODULE addon_module, HMODULE)
     RfxPatchWorkerStop();
     g_heap_to_res.unwatch_all(); // a live heap's release must not call into this DLL once it is unmapped
     g_tex_lod_worker.Stop();
+    TexCrawlFlushIfQuiet(0);
     TexLodOnExit();
+    TexLookOnExit();
     g_tex_eager.Stop();
     CrashHandler::Uninstall(); // the process's previous filter comes back before this code is unmapped
     reshade::unregister_addon(addon_module);

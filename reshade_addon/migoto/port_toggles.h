@@ -11,4 +11,6 @@ inline bool g_blend_write_all_rt = false;
 
 inline bool g_port_post_split = true;
 
+inline bool g_buffers_in_vram = true;
+
 } // namespace MigotoPort

@@ -6,6 +6,7 @@ EXTERN_C const GUID InputLayoutDescGuid;
 #include <d3dcompiler.h>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <string>
 #include <vector>
 #include <cstdio> // _snprintf_s for DescribeInputLayout (X20)
@@ -18,7 +19,6 @@ class LayoutStandIn final : public ::ID3D11InputLayout {
 public:
     Microsoft::WRL::ComPtr<ID3DBlob>      blob;
     std::vector<D3D11_INPUT_ELEMENT_DESC> elems;
-    std::vector<std::string>              names; // SemanticName storage; elems point into it
 
     ULONG STDMETHODCALLTYPE AddRef() override { return (ULONG)InterlockedIncrement(&rc_); }
     ULONG STDMETHODCALLTYPE Release() override
@@ -74,6 +74,7 @@ private:
 };
 
 std::unordered_map<unsigned long long, LayoutStandIn*> g_layouts;
+std::unordered_set<std::string>                        g_semantics;
 std::mutex                                             g_layout_mtx;
 LayoutStandIn*                                         g_current = nullptr;
 
@@ -84,13 +85,11 @@ void RecordInputLayout(unsigned long long pso, const InputElement* in, unsigned 
     if (!pso || !in || !count) return;
 
     auto* L = new LayoutStandIn();
-    L->names.reserve(count);
     L->elems.reserve(count);
-    for (unsigned i = 0; i < count; ++i)
-        L->names.emplace_back(in[i].semantic ? in[i].semantic : "");
+    std::lock_guard<std::mutex> l(g_layout_mtx);
     for (unsigned i = 0; i < count; ++i) {
         D3D11_INPUT_ELEMENT_DESC d{};
-        d.SemanticName = L->names[i].c_str();
+        d.SemanticName = g_semantics.emplace(in[i].semantic ? in[i].semantic : "").first->c_str();
         d.SemanticIndex = in[i].semantic_index;
         d.Format = (DXGI_FORMAT)in[i].format;
         d.InputSlot = in[i].buffer_binding;
@@ -104,8 +103,7 @@ void RecordInputLayout(unsigned long long pso, const InputElement* in, unsigned 
     if (SUCCEEDED(D3DCreateBlob(bytes, &L->blob)) && L->blob)
         memcpy(L->blob->GetBufferPointer(), L->elems.data(), bytes);
 
-    std::lock_guard<std::mutex> l(g_layout_mtx);
-    auto                        it = g_layouts.find(pso);
+    auto it = g_layouts.find(pso);
     if (it != g_layouts.end()) { // PSO handles are reused after destruction
         if (g_current == it->second) g_current = nullptr;
         it->second->Release();

@@ -18,6 +18,7 @@ inline constexpr uint64_t kTexHashFloorPx = 256ull * 256ull;
 #include <thread>
 #include <condition_variable>
 #include "../../src/dxgi_bc.h"
+#include "tex_look.h"
 
 inline uint32_t TexTypelessBC(uint32_t f)
 {
@@ -124,8 +125,8 @@ void     TexMipIdentityForget(uint64_t res); // on destroy: whatever was held fo
 
 int      TexSelectIdx(uint32_t hash);
 uint32_t TexRuleHashFor(uint32_t hash);
-// The mod target `hash` is a lower mip of, from the texture cache (and ns's own records), else 0.
-uint32_t TexLodTargetOf(uint32_t hash, const wchar_t* ns);
+// The mod target `hash` is a lower mip or (A13) a look-alike of, from the texture cache, else 0.
+uint32_t TexLodTargetOf(uint32_t hash);
 uint32_t ResolveBoundTextures(uint64_t heap, uint32_t base, uint32_t num, ID3D12Resource** res, uint32_t* hash,
     uint32_t cap, const std::bitset<512>* want = nullptr);
 // Resolve a matched texture hash to a mod SRV via its rule's conditional assigns (last match wins).
@@ -145,6 +146,7 @@ void TexHoldForRetry(uint64_t res);
 // A mod switched itself off: its stamped slots in CPU-only heaps get the game's descriptor back and are held.
 void                         TexUnstampSwitchedOff(const wchar_t* ns);
 void                         TexSwapsSwitched(bool were_live);
+void                         TexLookAlikesSwitched(bool on); // A13 changed: slots of look-alike textures swapped or given back
 void                         TexWatchSwitchedOff(const wchar_t* ns);
 void                         TexWatchSwitchedOn();
 bool                         TexOffWatching();
@@ -157,7 +159,7 @@ void TexTargetAudit();
 class TexLodWorker {
 public:
     void Queue(ID3D12Resource* dest, uint32_t crc, uint32_t w, uint32_t h, uint32_t fmt, bool is_target,
-        std::vector<uint8_t>&& bc);
+        const std::vector<uint8_t>& bc);
     void Stop();
     ~TexLodWorker()
     {
@@ -166,13 +168,10 @@ public:
 
 private:
     struct Job {
-        ID3D12Resource*      dest;
-        uint32_t             crc;
-        uint32_t             w;
-        uint32_t             h;
-        uint32_t             fmt;
-        bool                 is_target;
-        std::vector<uint8_t> sample;
+        ID3D12Resource* dest;
+        uint32_t        crc;
+        bool            is_target;
+        TexLookCut      cut;
     };
     void                    Run();
     std::deque<Job>         queue_; // under mtx_

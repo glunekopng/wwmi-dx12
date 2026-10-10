@@ -191,6 +191,8 @@ unsigned GameConstantBufferHash(unsigned dx11_byte_width);
 unsigned Crc32c(unsigned seed, const void* data, size_t n);
 
 bool NamespaceForIni(const wchar_t* abs_ini_path, wchar_t* out, size_t out_chars);
+void ForEachModIni(void (*cb)(const wchar_t* abs_ini, const wchar_t* ns, const wchar_t* abs_root, void* user),
+    void* user);
 
 bool ResolveSection(const wchar_t* ns, const wchar_t* ns_hint2, const wchar_t* section,
     wchar_t* out, size_t out_chars);
@@ -276,11 +278,12 @@ ID3D12Resource* CustomResourceDx12(const void* custom);
 struct BufferResourceInfo {
     ID3D12Resource*    dx12 = nullptr;
     unsigned long long gpu_va = 0;
-    unsigned           byte_width = 0;   // their D3D11_BUFFER_DESC.ByteWidth -- the real size
-    unsigned           stride = 0;       // their `stride =`, else the desc's StructureByteStride
-    bool               mappable = false; // UPLOAD heap -- the CPU-side paths may Map() it
+    unsigned           byte_width = 0; // their D3D11_BUFFER_DESC.ByteWidth -- the real size
+    unsigned           stride = 0;     // their `stride =`, else the desc's StructureByteStride
 };
 bool GetBufferResource(const wchar_t* fq_name, BufferResourceInfo* out);
+size_t BufferInitialData(const wchar_t* fq_name, void* out, size_t cap);
+bool   UploadBufferResource(const wchar_t* fq_name, const void* data, size_t bytes);
 
 void* AcquireBufferObject(const wchar_t* fq_name);
 

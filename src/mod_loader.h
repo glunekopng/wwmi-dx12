@@ -8,7 +8,6 @@ namespace ModLoader {
 
 unsigned SrvHeapSize();
 unsigned SrvHeapCap();
-void     SetDir(const wchar_t* mods_dir);
 void     Init(reshade::api::device* device);
 void     Reload();
 void     Tick(); // runs a pending Reload
@@ -34,12 +33,15 @@ bool            TexEntryAt(int index, TexEntry* out);
 unsigned        TexStoreGen();
 ID3D12Resource* TexResOfSrv(D3D12_CPU_DESCRIPTOR_HANDLE srv);
 
-bool IsExcludedEntry(const wchar_t* name);
-
-// One discovered mod: a top-level folder under the mods folder (d3dx.ini's include_recursive) and every .ini under it.
+// One mod: the top-most folder under one of d3dx.ini's include_recursive roots holding an ini their engine parsed,
+// with every such ini under it. An ini directly in a root is a mod of its own.
+struct ModIni {
+    std::wstring path; // absolute
+    std::wstring ns;   // their engine's namespace for it
+};
 struct DiscoveredMod {
-    std::wstring              dir;  // absolute mod folder
-    std::vector<std::wstring> inis; // all .ini under dir (recursive), DISABLED*-filtered, sorted
+    std::wstring        dir; // absolute mod folder
+    std::vector<ModIni> inis;
 };
 std::vector<DiscoveredMod> EnumerateMods();
 }

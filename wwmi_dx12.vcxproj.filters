@@ -148,6 +148,12 @@
     <ClCompile Include="reshade_addon\textures\tex_lod.cpp">
       <Filter>textures</Filter>
     </ClCompile>
+    <ClCompile Include="reshade_addon\textures\tex_look.cpp">
+      <Filter>textures</Filter>
+    </ClCompile>
+    <ClCompile Include="reshade_addon\textures\tex_crawl.cpp">
+      <Filter>textures</Filter>
+    </ClCompile>
     <ClCompile Include="reshade_addon\textures\tex_eager.cpp">
       <Filter>textures</Filter>
     </ClCompile>

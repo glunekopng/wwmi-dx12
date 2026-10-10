@@ -10,12 +10,13 @@
 #include "../mods/claim_state.h" // ModOnScreen: the per-component isolate list shows the mods on screen
 #include "../textures/texture_module.h"
 #include "../textures/tex_lod.h"       // TexLodSetResemblance (A13), TexLodSetCache (A14)
+#include "../textures/tex_crawl.h"     // the gallery crawl (A15)
 #include "../hooks/resource_tracker.h" // SetAddonDisabled (A1)
 #include "../../src/mod_loader.h"
 #include "../instrumentation/morph_dump.h"
 #include "../migoto/port_api.h"      // the loaded engine: variables for the PANELGATE dump
 #include "../migoto/dx12_bridge.h"   // X30 counters
-#include "../migoto/port_toggles.h"  // g_inherit_game_viewport, g_port_post_split, g_blend_write_all_rt
+#include "../migoto/port_toggles.h"  // g_inherit_game_viewport, g_port_post_split, g_blend_write_all_rt, g_buffers_in_vram
 #include "../migoto/dx12_pipeline.h" // ArmPresentDrawProbe (PRESENTDRAW)
 #include "../rabbitfx/pso_blend.h"   // GetRfxPatchStats (E2)
 #include "../../src/log.h"           // PANELGATE dump
@@ -103,9 +104,18 @@ static const char kRtBlockedText[] =
     "Ray tracing is ON in the game, and this version does not support it: mods are OFF.\n"
     "Turn ray tracing off in the game's graphics settings, then restart the game.";
 
-void DrawRtBlockedNotice(effect_runtime*)
+static const char kFaultedText[] =
+    "The add-on hit an error and stopped: mods are OFF until the game restarts.\n"
+    "Please report it with wwmi_dx12_crash.log from the game's Win64 folder.";
+
+static const char* StoppedText()
 {
-    ImGui::TextColored({ 1, 0.4f, 0.4f, 1 }, "wwmi-dx12: %s", kRtBlockedText);
+    return g_faulted ? kFaultedText : kRtBlockedText;
+}
+
+void DrawStoppedNotice(effect_runtime*)
+{
+    ImGui::TextColored({ 1, 0.4f, 0.4f, 1 }, "wwmi-dx12: %s", StoppedText());
 }
 
 void DrawOverlay(effect_runtime*)
@@ -134,8 +144,8 @@ void DrawOverlay(effect_runtime*)
 #endif
 
     ImGui::Separator();
-    if (g_rt_blocked) {
-        ImGui::TextColored({ 1, 0.4f, 0.4f, 1 }, "%s", kRtBlockedText);
+    if (g_rt_blocked || g_faulted) {
+        ImGui::TextColored({ 1, 0.4f, 0.4f, 1 }, "%s", StoppedText());
         return;
     }
 #ifdef WWMI_DEBUG
@@ -172,8 +182,9 @@ void DrawOverlay(effect_runtime*)
 #endif
     {
         bool lookalike = g_texlod_resemblance;
-        if (NCheckbox("A13", "Use look-alike texture matches (a distant copy that only looks like a mod's texture gets it, in that mod's own draws)", &lookalike)) {
+        if (NCheckbox("A13", "Use look-alike texture matches (a game texture that looks like a mod's texture gets it, as if it had the same hash)", &lookalike)) {
             TexLodSetResemblance(lookalike);
+            TexLookAlikesSwitched(lookalike);
             if (!g_addon_ini_path.empty())
                 WritePrivateProfileStringW(L"wwmi-dx12", L"lod_resemblance", lookalike ? L"1" : L"0", g_addon_ini_path.c_str());
         }
@@ -205,6 +216,11 @@ void DrawOverlay(effect_runtime*)
         if (s_clear) ImGui::TextColored({ 1, 1, 0, 1 }, "Caches will be cleared at the next launch.");
     }
 #ifdef WWMI_DEBUG
+    {
+        bool crawl = TexCrawlOn();
+        if (NCheckbox("A15", "Gallery crawl: record every character texture's mips and where each character draw binds it; saved 10 s after the last new texture (at least once a minute), when switched off and at exit", &crawl))
+            TexCrawlSet(crawl);
+    }
     NCheckbox("A9", "Skip the engine tick: no [Present] lists, no present pass (perf A/B only -- mods stop updating)", &g_skip_engine_tick);
     if (NButton("A10", "Verbose log for 600 frames: every line, no rate limit, per-frame telemetry, shader patch dumps"))
         VerboseArm(600);
@@ -447,6 +463,11 @@ void DrawOverlay(effect_runtime*)
             &MigotoPort::g_inherit_game_viewport);
         NCheckbox("B13", "Pre/post SPLIT: run post lists after the draw (off = old inline behaviour)",
             &MigotoPort::g_port_post_split);
+        if (NCheckbox("B14", "Mod buffers in VRAM (off = in system RAM, read over PCIe as before; applies at the next launch, or reload B1)",
+                &MigotoPort::g_buffers_in_vram) &&
+            !g_addon_ini_path.empty())
+            WritePrivateProfileStringW(L"wwmi-dx12", L"buffers_in_vram", MigotoPort::g_buffers_in_vram ? L"1" : L"0",
+                g_addon_ini_path.c_str());
         if (NButton("B15", "Log merged-blend draws (8 frames)")) g_log_merged.store(8);
         NCheckbox("B16", "Hide UNCLAIMED char draws (shadow/LOD proxy) [clone test]", &g_hide_unclaimed_char);
         {

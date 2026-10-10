@@ -16,6 +16,7 @@
 #include "draw_inject.h"
 #include "../mods/wwmi_mod.h"
 #include "../migoto/dx12_bridge.h"
+#include "../textures/tex_crawl.h"
 
 struct CompBoneCb {
     uint64_t va = 0;
@@ -29,13 +30,16 @@ struct SkBones {
     unsigned n = 0;
     float    t[kSkMatchBones * 3] = {};
 };
+struct SkCopyCb {
+    uint64_t va = 0; // the component's bone CB this frame
+    SkBones  bones;  // read at its draw: by the next frame the game may have released the CB
+};
 struct SkCopySeen {
-    uint64_t                     key = 0;
-    unsigned                     slot = 0;
-    std::vector<uint64_t>        cb4_va;
-    std::vector<ID3D12Resource*> cb4_res;
-    std::vector<uint64_t>        keys;
-    std::vector<uint64_t>        cb4_drawn;
+    uint64_t              key = 0;
+    unsigned              slot = 0;
+    std::vector<SkCopyCb> cb4;
+    std::vector<uint64_t> keys;
+    std::vector<uint64_t> cb4_drawn;
 };
 struct SkCopyMod {
     uint32_t                          frame = 0;
@@ -93,9 +97,9 @@ static void SkCopyRoll(SkCopyMod& m, int dm)
     size_t active = 0;
     for (const SkCopySeen& e : m.cur) {
         m.prev_slots.push_back(e.slot);
-        comps = e.cb4_va.size() > comps ? e.cb4_va.size() : comps;
-        for (uint64_t va : e.cb4_va)
-            if (va) {
+        comps = e.cb4.size() > comps ? e.cb4.size() : comps;
+        for (const SkCopyCb& cb : e.cb4)
+            if (cb.va) {
                 ++active;
                 break;
             }
@@ -104,7 +108,7 @@ static void SkCopyRoll(SkCopyMod& m, int dm)
     for (size_t c = 0; c < comps; ++c) {
         size_t n = 0;
         for (const SkCopySeen& e : m.cur)
-            if (c < e.cb4_va.size() && e.cb4_va[c]) ++n;
+            if (c < e.cb4.size() && e.cb4[c].va) ++n;
         most = n > most ? n : most;
     }
     m.oversplit = (most && active > most) ? m.oversplit + 1 : 0;
@@ -120,9 +124,9 @@ static void SkCopyRoll(SkCopyMod& m, int dm)
         m.prev_bones.assign(top + 1, std::vector<SkBones>());
         for (const SkCopySeen& e : m.cur) {
             std::vector<SkBones>& pb = m.prev_bones[e.slot];
-            pb.resize(e.cb4_va.size());
-            for (size_t c = 0; c < e.cb4_va.size(); ++c)
-                if (e.cb4_va[c]) pb[c] = SkBonesOf(e.cb4_res[c], e.cb4_va[c]);
+            pb.resize(e.cb4.size());
+            for (size_t c = 0; c < e.cb4.size(); ++c)
+                if (e.cb4[c].va) pb[c] = e.cb4[c].bones;
         }
     }
     m.cur.clear();
@@ -222,17 +226,14 @@ static unsigned SkCopySlot(reshade::api::command_list* cl, int dm, int comp, ID3
     SkCopySeen& e = m.cur[at];
     if (cb4_va && std::find(e.cb4_drawn.begin(), e.cb4_drawn.end(), cb4_va) == e.cb4_drawn.end()) e.cb4_drawn.push_back(cb4_va);
     if (!shadow && cb4_va) {
-        if (e.cb4_va.size() <= (size_t)comp) {
-            e.cb4_va.resize((size_t)comp + 1, 0);
-            e.cb4_res.resize((size_t)comp + 1, nullptr);
-        }
-        if (!e.cb4_va[comp]) {
-            e.cb4_va[comp] = cb4_va;
-            e.cb4_res[comp] = cb4_res;
-        } else if (e.cb4_va[comp] != cb4_va && DiagOnce("SKCOPIES-SHARED", dm)) {
+        if (e.cb4.size() <= (size_t)comp) e.cb4.resize((size_t)comp + 1);
+        if (!e.cb4[comp].va) {
+            e.cb4[comp].va = cb4_va;
+            e.cb4[comp].bones = SkBonesOf(cb4_res, cb4_va);
+        } else if (e.cb4[comp].va != cb4_va && DiagOnce("SKCOPIES-SHARED", dm)) {
             logger::write("SKCOPIES mod=%d comp=%d f=%u: vs-cb2 %llx is drawn with two bone CBs (%llx, %llx) -- copies under "
                           "one per-object address share one skeleton",
-                dm, comp, g_frame_id, (unsigned long long)key, (unsigned long long)e.cb4_va[comp],
+                dm, comp, g_frame_id, (unsigned long long)key, (unsigned long long)e.cb4[comp].va,
                 (unsigned long long)cb4_va);
         }
     }
@@ -244,34 +245,65 @@ constexpr uint32_t                            kSectexGap = 30; // frames unseen 
 static std::mutex                             g_sectex_mtx;
 static std::unordered_map<uint64_t, uint32_t> g_sectex_last; // hash | unread << 32 -> last frame a section saw it
 
-static uint16_t PublishSectionTextures(reshade::api::command_list* cmd_list, int dm, int comp, uint32_t rtv_count)
+struct PsTexture {
+    unsigned   reg = 0;
+    bool       read = false;
+    TableStart ts;
+    uint32_t   offset = 0;
+    ResInfo    ri;
+};
+
+// Each pixel-shader SRV register of the bound layout that the pipeline reads (with `unread`, the rest too) and
+// `want(reg)` accepts, resolved to the resource behind it. False when the layout has no register map.
+template <typename Want, typename Fn>
+static bool ForEachPsTexture(reshade::api::command_list* cmd_list, bool unread, const DxilSrvRegs& ps_regs, Want&& want,
+    Fn&& fn)
 {
     const uint64_t layh = CmdGfxLayout(cmd_list);
     RegBind        t_ps[kSectionTexRegs];
     {
         std::lock_guard l(g_layout_regmap_mtx);
         auto            it = g_layout_regmap.find(layh);
-        if (it == g_layout_regmap.end() || !it->second.built) return 0;
+        if (it == g_layout_regmap.end() || !it->second.built) return false;
         memcpy(t_ps, it->second.t_ps, sizeof t_ps);
     }
-    device*           dev = cmd_list->get_device();
-    const auto&       root = CmdGfx(cmd_list).root;
-    const DxilSrvRegs ps_regs = PipelineSrvRegs(CmdGfx(cmd_list).gfx_pso, 'p');
-    uint16_t          pushed = 0;
+    device*     dev = cmd_list->get_device();
+    const auto& root = CmdGfx(cmd_list).root;
     for (unsigned r = 0; r < kSectionTexRegs; ++r) {
         const RegBind& b = t_ps[r];
         if (b.param == 0xFF || b.param >= 64 || !b.is_table) continue;
-        const bool read = ps_regs.reads(r);
-        if (!read && !g_debug) continue;
-        const TableStart ts = TableStartOf(dev, root[b.param].table);
-        if (!ts) continue;
-        ResInfo ri;
-        if (!g_heap_to_res.find({ ts.heap, ts.base + b.offset }, ri) || !ri.res) continue;
-        const uint32_t resident = TexHashOf(reinterpret_cast<uint64_t>(ri.res));
+        PsTexture t;
+        t.reg = r;
+        t.read = ps_regs.reads(r);
+        if ((!t.read && !unread) || !want(r)) continue;
+        t.ts = TableStartOf(dev, root[b.param].table);
+        if (!t.ts) continue;
+        t.offset = b.offset;
+        if (!g_heap_to_res.find({ t.ts.heap, t.ts.base + b.offset }, t.ri) || !t.ri.res) continue;
+        fn(t);
+    }
+    return true;
+}
+
+static uint16_t PublishSectionTextures(reshade::api::command_list* cmd_list, int dm, int comp, uint32_t rtv_count)
+{
+    const DxilSrvRegs ps_regs = PipelineSrvRegs(CmdGfx(cmd_list).gfx_pso, 'p');
+    uint16_t          pushed = 0;
+    uint64_t          ps_hash = 0;
+    cmd_list->get_private_data(s_iid_ps_hash, &ps_hash);
+    const uint64_t pass = TexLookPlaceOf(g_geomods[dm].wcl_ns.c_str(), comp, ps_hash);
+    ForEachPsTexture(cmd_list, g_debug, ps_regs, [](unsigned) { return true; }, [&](const PsTexture& t) {
+        const unsigned    r = t.reg;
+        const bool        read = t.read;
+        const TableStart& ts = t.ts;
+        const ResInfo&    ri = t.ri;
+        const uint32_t    resident = TexHashOf(reinterpret_cast<uint64_t>(ri.res));
+        if (read && resident)
+            TexLookAtPlace(pass, r, resident, PortApi::TextureHashHasSections(resident) ? resident : TexLodKnown(resident));
         const uint32_t hash = !resident || PortApi::TextureHashHasSections(resident)
             ? resident
-            : TexLodTargetOf(resident, g_geomods[dm].wcl_ns.c_str());
-        if (!hash || !PortApi::TextureHashHasSections(hash)) continue;
+            : TexLodTargetOf(resident);
+        if (!hash || !PortApi::TextureHashHasSections(hash)) return;
         if (read) {
             PortApi::PushGameTexture('p', r, ri.res, hash);
             pushed |= (uint16_t)(1u << r);
@@ -285,22 +317,66 @@ static uint16_t PublishSectionTextures(reshade::api::command_list* cmd_list, int
                 last = g_frame_id;
             }
             if (appeared || g_sectex_watch.load(std::memory_order_relaxed) > 0) {
-                uint64_t ps_hash = 0;
-                cmd_list->get_private_data(s_iid_ps_hash, &ps_hash);
                 char lod[24] = "";
                 if (hash != resident) sprintf_s(lod, " (its mip %08x)", resident);
                 logger::write("SECTEX f=%u mod=%d comp=%d ps-t%u rtv=%u: %08x%s res=%p at %llx+%u, written %u frame(s) "
                               "ago (src %u), ps=%016llx %s -- %s",
                     g_frame_id, dm, comp, r, rtv_count, hash, lod, (void*)ri.res, (unsigned long long)ts.heap,
-                    ts.base + b.offset, g_frame_id - ri.wrote_frame, (unsigned)ri.wrote_src,
+                    ts.base + t.offset, g_frame_id - ri.wrote_frame, (unsigned)ri.wrote_src,
                     (unsigned long long)ps_hash,
                     !read ? "does NOT read it: not published" : ps_regs.parsed ? "reads it"
                                                                                : "(no PSV) published",
                     appeared ? "first sighting in 30+ frames" : "watch: a mod switched itself back on");
             }
         }
-    }
+    });
     return pushed;
+}
+
+void NoteMeshPlaces(const DrawArgs& da)
+{
+    const bool crawl = TexCrawlOn();
+    if (!crawl && !TexLookHasMeshPlaces()) return;
+    reshade::api::command_list* const cmd_list = da.cmd_list;
+    ID3D12Resource*                   ibr = nullptr;
+    ID3D12Resource*                   vbr = nullptr;
+    uint64_t                          ibva = 0;
+    uint64_t                          vbva = 0;
+    uint32_t                          idxb = 2;
+    uint32_t                          vstride = 0;
+    {
+        const auto& st = CmdGfx(cmd_list);
+        if (!InSkinBand(st.vb[0].va) && !st.vb[6].res) return;
+        ibr = st.ib.res;
+        ibva = st.ib.va;
+        if (st.ib.index_bytes) idxb = st.ib.index_bytes;
+        vbr = st.vb[0].res;
+        vbva = st.vb[0].va;
+        vstride = st.vb[0].stride;
+    }
+    if (!ibr || !vbr || !vstride) return;
+    const uint32_t ib_hash = IbHash::Lookup(ibr, (uint32_t)(ibva - ibr->GetGPUVirtualAddress()),
+        (da.first_index + da.index_count) * idxb, idxb, vbr, (uint32_t)(vbva - vbr->GetGPUVirtualAddress()), vstride,
+        /*grow*/ true);
+    if (!ib_hash) return;
+    uint64_t ps_hash = 0;
+    cmd_list->get_private_data(s_iid_ps_hash, &ps_hash);
+    const uint64_t pass = TexLookMeshPassOf(ib_hash, da.first_index, da.index_count, ps_hash);
+    const uint32_t mask = crawl ? ~0u : TexLookMeshMask(pass, kSectionTexRegs);
+    if (!mask) return;
+    const DxilSrvRegs ps_regs = PipelineSrvRegs(CmdGfx(cmd_list).gfx_pso, 'p');
+    ForEachPsTexture(
+        cmd_list, false, ps_regs, [&](unsigned r) { return ((mask >> r) & 1u) != 0; },
+        [&](const PsTexture& t) {
+            const uint32_t resident = TexHashOf(reinterpret_cast<uint64_t>(t.ri.res));
+            if (!resident) return;
+            const uint64_t place = TexLookSlotOf(pass, t.reg);
+            if (crawl)
+                TexCrawlNote(place, resident);
+            else
+                TexLookAtMeshPlace(place, resident,
+                    PortApi::TextureHashHasSections(resident) ? resident : TexLodKnown(resident));
+        });
 }
 
 bool DrawComponent(InjectFrame& fr, int dm, const WwmiMod::Component* wc)

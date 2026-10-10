@@ -1,24 +1,19 @@
 // ===========================================================================
-//  tex_lod.cpp -- see tex_lod.h. BC decode (bcdec.h) -> 32x32 RGB signature ->
-//  NCC content match -> lower->target links -> one line per target in our cache
-//  file, each low under it with its flags (mip, exact, chain), and one line of degenerate lows.
+//  tex_lod.cpp -- see tex_lod.h. Lower->target links -- proven from the game's own data, or
+//  look-alikes from tex_look -> one line per target in our cache file, each low under it with its
+//  flags (mip, exact, chain, ssim), and one line of degenerate lows.
 // ===========================================================================
-#define BCDEC_IMPLEMENTATION
-#include "../../third_party/bcdec/bcdec.h"
 #include "tex_lod.h"
 #include "../../src/log.h"
-#include "../../src/dxgi_bc.h"
 #include "../config.h"
 #include <windows.h>
 #include <atomic>
 #include <unordered_map>
 #include <mutex>
 #include <vector>
-#include <cmath>
 #include <cstdio>
 #include <share.h>
 #include <set>
-#include <shared_mutex>
 #include <string>
 #include <algorithm>
 #include <map>
@@ -27,22 +22,8 @@
 
 namespace {
 
-constexpr int   SIG = 32;                // 32x32 grid signature (3072 samples)
-constexpr float NCC_MIN = 0.97f;         // sanity correlation (validated diffuse pair ~0.9997)
-constexpr float RMSE_MAX = 8.0f;         // absolute per-texel RMSE (0-255); true LOD is ~pixel-identical
-constexpr float RMSE_UNMEASURED = 255.f; // a look-alike whose content was never compared
-constexpr float MIN_STD = 18.0f;         // require spatial structure; flat normal/mask maps can't disambiguate
-
-struct LodSig {
-    uint8_t  v[SIG * SIG * 3];
-    uint32_t w;
-    uint32_t h;
-    uint32_t fmt;
-    bool     is_target;
-};
-
-std::mutex                           g_mtx;  // WRITERS only (sigs, records, table writes, dirs); see g_tab
-std::unordered_map<uint32_t, LodSig> g_sigs; // hash -> signature
+std::mutex      g_mtx;               // WRITERS only (records, table writes, dirs); see g_tab
+constexpr float SSIM_MARGIN = 0.03f; // a look-alike under several targets swaps as the best by at least this
 
 struct Entry {
     bool                  exact = false;
@@ -125,7 +106,8 @@ struct Link {
     uint32_t mip = 0;
     bool     exact = false;
     bool     chain = false;
-    float    rmse = RMSE_UNMEASURED;
+    bool     place = false; // a look-alike by where it is drawn (tex_look's places), its ssim 1
+    float    ssim = 0;      // a look-alike's: 0 is one from before tex_look, dropped at load
 };
 struct Rec {
     std::vector<Link> links;
@@ -168,154 +150,6 @@ uint32_t one_texture(uint32_t a, uint32_t b)
     return 0;
 }
 
-// Decode the single texel (px,py) of a BC image into rgb[3]. Decodes only the block that contains it.
-void sample_px(uint32_t fmt, const uint8_t* bc, size_t bc_size, uint32_t blocksW,
-    uint32_t px, uint32_t py, uint8_t rgb[3])
-{
-    uint32_t bx = px >> 2;
-    uint32_t by = py >> 2;
-    uint32_t inx = px & 3;
-    uint32_t iny = py & 3;
-    uint32_t bb = DxgiBcBlockBytes(fmt);
-    size_t   off = ((size_t)by * blocksW + bx) * bb;
-    if (off + bb > bc_size) {
-        rgb[0] = rgb[1] = rgb[2] = 0;
-        return;
-    }
-    const uint8_t* blk = bc + off;
-    if (fmt >= 94 && fmt <= 99) {
-        uint8_t b[64];
-        bcdec_bc7(blk, b, 16);
-        const uint8_t* p = b + (iny * 4 + inx) * 4;
-        rgb[0] = p[0];
-        rgb[1] = p[1];
-        rgb[2] = p[2];
-    } else if (fmt >= 70 && fmt <= 72) {
-        uint8_t b[64];
-        bcdec_bc1(blk, b, 16);
-        const uint8_t* p = b + (iny * 4 + inx) * 4;
-        rgb[0] = p[0];
-        rgb[1] = p[1];
-        rgb[2] = p[2];
-    } else if (fmt >= 76 && fmt <= 78) {
-        uint8_t b[64];
-        bcdec_bc3(blk, b, 16);
-        const uint8_t* p = b + (iny * 4 + inx) * 4;
-        rgb[0] = p[0];
-        rgb[1] = p[1];
-        rgb[2] = p[2];
-    } else if (fmt >= 82 && fmt <= 84) {
-        uint8_t b[32];
-        bcdec_bc5(blk, b, 8);
-        const uint8_t* p = b + (iny * 4 + inx) * 2;
-        rgb[0] = p[0];
-        rgb[1] = p[1];
-        rgb[2] = 0;
-    } // BC5 = RG
-    else {
-        rgb[0] = rgb[1] = rgb[2] = 0;
-    }
-}
-
-LodSig make_sig(uint32_t fmt, const uint8_t* bc, size_t bc_size, uint32_t w, uint32_t h, bool tgt)
-{
-    LodSig s;
-    s.w = w;
-    s.h = h;
-    s.fmt = fmt;
-    s.is_target = tgt;
-    uint32_t blocksW = (w + 3) / 4;
-    for (int gy = 0; gy < SIG; ++gy)
-        for (int gx = 0; gx < SIG; ++gx) {
-            uint32_t px = (uint32_t)(((2 * gx + 1) * (uint64_t)w) / (2 * SIG));
-            if (px >= w) px = w - 1;
-            uint32_t py = (uint32_t)(((2 * gy + 1) * (uint64_t)h) / (2 * SIG));
-            if (py >= h) py = h - 1;
-            sample_px(fmt, bc, bc_size, blocksW, px, py, &s.v[(gy * SIG + gx) * 3]);
-        }
-    return s;
-}
-
-float ncc(const LodSig& a, const LodSig& b)
-{
-    double ma = 0;
-    double mb = 0;
-    for (int i = 0; i < SIG * SIG * 3; ++i) {
-        ma += a.v[i];
-        mb += b.v[i];
-    }
-    ma /= SIG * SIG * 3;
-    mb /= SIG * SIG * 3;
-    double num = 0;
-    double da = 0;
-    double db = 0;
-    for (int i = 0; i < SIG * SIG * 3; ++i) {
-        double fa = a.v[i] - ma;
-        double fb = b.v[i] - mb;
-        num += fa * fb;
-        da += fa * fa;
-        db += fb * fb;
-    }
-    return (float)(num / (std::sqrt(da * db) + 1e-9));
-}
-
-float rmse(const LodSig& a, const LodSig& b)
-{
-    double s = 0;
-    for (int i = 0; i < SIG * SIG * 3; ++i) {
-        double d = (double)a.v[i] - b.v[i];
-        s += d * d;
-    }
-    return (float)std::sqrt(s / (SIG * SIG * 3));
-}
-
-// Spatial std of a signature. Near-flat textures (normal/mask maps) can't be disambiguated by content.
-float sig_std(const LodSig& a)
-{
-    double m = 0;
-    for (int i = 0; i < SIG * SIG * 3; ++i) m += a.v[i];
-    m /= SIG * SIG * 3;
-    double v = 0;
-    for (int i = 0; i < SIG * SIG * 3; ++i) {
-        double d = a.v[i] - m;
-        v += d * d;
-    }
-    v /= SIG * SIG * 3;
-    return (float)std::sqrt(v);
-}
-
-// True LOD pair test: enough structure on both, near-identical content (low RMSE), correlated.
-bool is_lod_match(const LodSig& big, const LodSig& sm, float& out_rmse)
-{
-    if (sig_std(big) < MIN_STD || sig_std(sm) < MIN_STD) return false;
-    float r = rmse(big, sm);
-    if (r > RMSE_MAX) {
-        out_rmse = r;
-        return false;
-    }
-    if (ncc(big, sm) < NCC_MIN) {
-        out_rmse = r;
-        return false;
-    }
-    out_rmse = r;
-    return true;
-}
-
-bool same_aspect(uint32_t w1, uint32_t h1, uint32_t w2, uint32_t h2)
-{
-    return (uint64_t)w1 * h2 == (uint64_t)w2 * h1;
-}
-
-bool is_lod_parent(const LodSig& big, const LodSig& sm)
-{
-    if (!same_aspect(big.w, big.h, sm.w, sm.h)) return false; // proportions first, before content
-    if (big.w <= sm.w || big.h <= sm.h) return false;         // big strictly larger in both dims
-    if (big.w % sm.w || big.h % sm.h) return false;
-    uint32_t rx = big.w / sm.w;
-    uint32_t ry = big.h / sm.h;
-    return rx == ry && (rx & (rx - 1)) == 0; // uniform power-of-two downscale
-}
-
 std::wstring cache_path()
 {
     return g_cache_dir.empty() ? std::wstring() : (g_cache_dir + L"\\lod_tex_cache.lodcache");
@@ -326,16 +160,18 @@ const char* const kHeader =
     "; A low is a lower-resolution texture the game streams in; it is swapped as its target's mod texture.\n"
     ";   mip=K         the low is the target's mip K (0: the level is not known)\n"
     ";   exact=1       proven from the game's own data: the target's own mip, or a stream copy\n"
-    ";   exact=0       only looks alike, dropped once a low is proven to be that mip of the target: used with\n"
-    ";                 lod_resemblance=1, and only in draws of a mod that declares the target\n"
-    ";   chain=1       learned through a chain of stream copies; a look-alike learned so has the rmse of the one it came through\n"
-    ";   rmse=R        a look-alike's difference from identical, 0-255 per texel (none: never measured); it needs R <= %.0f and correlation >= %.2f\n"
+    ";   exact=0       only looks alike (tex_look, its reference in tex_look.bin): with lod_resemblance=1 swapped like\n"
+    ";                 an exact low; under several targets, as the one ahead by 0.03 ssim, else not at all\n"
+    ";   chain=1       learned through a chain of stream copies; a look-alike learned so has the ssim of the one it came through\n"
+    ";   ssim=S        a look-alike's lowest patch similarity to the target's reference (1: identical)\n"
+    ";   place=1       a look-alike by where it is drawn: HD drew the target at that slot of a mod's component\n"
     "; degenerate = <low> <low> ...  identical to the mips of more than one target: never swapped, never learned again\n";
 
 void write_entry(FILE* f, uint32_t low, const Link& k)
 {
     fprintf(f, "%08x mip=%u exact=%d chain=%d", low, k.mip, (int)k.exact, (int)k.chain);
-    if (!k.exact && k.rmse != RMSE_UNMEASURED) fprintf(f, " rmse=%.2f", k.rmse);
+    if (!k.exact) fprintf(f, " ssim=%.3f", k.ssim);
+    if (k.place) fputs(" place=1", f);
 }
 
 bool     g_dirty = false; // learned since the file was last written -- under g_mtx
@@ -347,21 +183,21 @@ void mark_dirty()
     g_dirty_at = GetTickCount64();
 }
 
-// The whole cache from g_records, one line per target, then g_degenerate, through a temp file. Caller holds g_mtx.
-void rewrite_cache()
+// The links of g_records `keep` accepts (all, without one), one line per target, then g_degenerate, to `path` through a
+// temp file. Caller holds g_mtx.
+bool write_records(const std::wstring& path, bool (*keep)(const Link& k, void* user), void* user)
 {
-    const std::wstring path = cache_path();
-    if (path.empty() || !g_texlod_cache) return;
     std::map<uint32_t, std::vector<std::pair<uint32_t, const Link*>>> by_target;
     for (auto& kv : g_records)
-        for (const Link& k : kv.second.links) by_target[k.high].emplace_back(kv.first, &k);
+        for (const Link& k : kv.second.links)
+            if (!keep || keep(k, user)) by_target[k.high].emplace_back(kv.first, &k);
     const std::wstring tmp = path + L".tmp";
     FILE*              f = _wfsopen(tmp.c_str(), L"w", _SH_DENYNO);
     if (!f) {
         logger::write("TexLod: cannot write %S", tmp.c_str());
-        return;
+        return false;
     }
-    fprintf(f, kHeader, RMSE_MAX, NCC_MIN);
+    fputs(kHeader, f);
     for (auto& t : by_target) {
         std::sort(t.second.begin(), t.second.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
         fprintf(f, "%08x = ", t.first);
@@ -379,8 +215,16 @@ void rewrite_cache()
     fclose(f);
     if (!MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) {
         logger::write("TexLod: cannot replace %S (err %lu)", path.c_str(), GetLastError());
-        return;
+        return false;
     }
+    return true;
+}
+
+// The whole cache. Caller holds g_mtx.
+void rewrite_cache()
+{
+    const std::wstring path = cache_path();
+    if (path.empty() || !g_texlod_cache || !write_records(path, nullptr, nullptr)) return;
     g_dirty = false;
     for (const auto& seed : g_imported) {
         if (MoveFileW(seed.first.c_str(), seed.second.c_str()))
@@ -393,6 +237,22 @@ void rewrite_cache()
     g_imported.clear();
 }
 
+// Of a look-alike record's links, the one that beats every other by SSIM_MARGIN; null for one link or a near-tie.
+const Link* clear_best(const Rec& r)
+{
+    const Link* best = nullptr;
+    float       second = 0;
+    for (const Link& k : r.links) {
+        if (best && k.ssim <= best->ssim) {
+            second = (std::max)(second, k.ssim);
+            continue;
+        }
+        if (best) second = (std::max)(second, best->ssim);
+        best = &k;
+    }
+    return r.links.size() > 1 && best && best->ssim - second >= SSIM_MARGIN ? best : nullptr;
+}
+
 // A low's entry from its record, for the lock-free readers; the lookups decide what it swaps. Caller holds g_mtx.
 void publish(uint32_t low)
 {
@@ -401,10 +261,15 @@ void publish(uint32_t low)
         if (entry_of(low)) tab_set(low, nullptr);
         return;
     }
-    const Rec& r = it->second;
-    auto*      e = new Entry;
+    const Rec&  r = it->second;
+    auto*       e = new Entry;
+    const Link* best = nullptr;
     e->exact = exact(r);
-    for (const Link& k : r.links) e->highs.push_back(k.high);
+    if (!e->exact) best = clear_best(r);
+    if (best)
+        e->highs.push_back(best->high);
+    else
+        for (const Link& k : r.links) e->highs.push_back(k.high);
     const Entry* was = entry_of(low);
     if (was && was->exact == e->exact && was->highs == e->highs) {
         delete e;
@@ -478,10 +343,11 @@ bool parse_line(const char* line, Records& into, std::set<uint32_t>& degen)
                 k.chain = atoi(val) != 0;
             else if (key == "degenerate")
                 flagged = atoi(val) != 0;
-            else if (key == "rmse")
-                k.rmse = (float)atof(val);
+            else if (key == "ssim")
+                k.ssim = (float)atof(val);
+            else if (key == "place")
+                k.place = atoi(val) != 0;
         }
-        if (!k.exact && k.chain && !k.mip && k.rmse == 0.f) k.rmse = RMSE_UNMEASURED;
         if (flagged && k.exact)
             degen.insert((uint32_t)low);
         else
@@ -562,10 +428,16 @@ void load_file(const std::wstring& path, int& files, Records& into, std::set<uin
     fclose(f);
 }
 
-void normalize(Records& rs, std::set<uint32_t>& degen)
+// Returns the look-alike links from before tex_look it dropped.
+size_t normalize(Records& rs, std::set<uint32_t>& degen)
 {
+    size_t old = 0;
     for (auto it = rs.begin(); it != rs.end();) {
-        auto& links = it->second.links;
+        auto&        links = it->second.links;
+        const size_t was = links.size();
+        links.erase(std::remove_if(links.begin(), links.end(), [](const Link& k) { return !k.exact && k.ssim <= 0; }),
+            links.end());
+        old += was - links.size();
         if (std::any_of(links.begin(), links.end(), [](const Link& k) { return k.exact; }))
             links.erase(std::remove_if(links.begin(), links.end(), [](const Link& k) { return !k.exact; }), links.end());
         if (exact(it->second) && links.size() > 1) degen.insert(it->first);
@@ -574,50 +446,7 @@ void normalize(Records& rs, std::set<uint32_t>& degen)
         else
             ++it;
     }
-}
-
-uint64_t at_mip(uint32_t high, uint32_t mip)
-{
-    return ((uint64_t)high << 32) | mip;
-}
-
-bool mip_proven(uint32_t high, uint32_t mip)
-{ // caller holds g_mtx: some low is the exact mip `mip` of `high`, its level known
-    if (!mip) return false;
-    for (auto& kv : g_records) {
-        if (!exact(kv.second)) continue;
-        const Link& k = kv.second.links.front();
-        if (k.high == high && k.mip == mip) return true;
-    }
-    return false;
-}
-
-size_t drop_lookalikes_of(const std::set<uint64_t>& proven)
-{
-    size_t                dropped = 0;
-    std::vector<uint32_t> touched;
-    for (auto it = g_records.begin(); it != g_records.end();) {
-        auto& links = it->second.links;
-        if (exact(it->second)) {
-            ++it;
-            continue;
-        }
-        const size_t was = links.size();
-        links.erase(
-            std::remove_if(links.begin(), links.end(), [&](const Link& k) { return proven.count(at_mip(k.high, k.mip)) != 0; }),
-            links.end());
-        if (links.size() != was) {
-            dropped += was - links.size();
-            touched.push_back(it->first);
-        }
-        if (links.empty())
-            it = g_records.erase(it);
-        else
-            ++it;
-    }
-    for (uint32_t low : touched) publish(low);
-    if (dropped) mark_dirty();
-    return dropped;
+    return old;
 }
 
 void import_seed(const std::wstring& path, const wchar_t* name)
@@ -696,27 +525,11 @@ void import_seed(const std::wstring& path, const wchar_t* name)
         path.c_str(), proven, added, proved_guess, gave_mip, raised, kept, listed, disagree);
 }
 
-// `low` was just made the exact mip `mip` of `high` (0: the level is not known). Caller holds g_mtx.
-void proven(uint32_t low, uint32_t high, uint32_t mip)
+// `low` was just made an exact low, or its level filled in. Caller holds g_mtx.
+void proven(uint32_t low)
 {
     mark_dirty();
     publish(low);
-    if (!mip) return;
-    if (const size_t n = drop_lookalikes_of({ at_mip(high, mip) }))
-        logger::write("TexLod: %08x mip %u proven by %08x -- %zu look-alike link(s) claiming that mip dropped", high, mip,
-            low, n);
-}
-
-// drop_lookalikes_of every mip a low is proven to be. Caller holds g_mtx.
-size_t drop_lookalikes_of_proven()
-{
-    std::set<uint64_t> mips;
-    for (auto& kv : g_records) {
-        if (!exact(kv.second)) continue;
-        const Link& k = kv.second.links.front();
-        if (k.mip) mips.insert(at_mip(k.high, k.mip));
-    }
-    return drop_lookalikes_of(mips);
 }
 
 bool learn_exact(uint32_t low, uint32_t high, uint32_t mip, bool chain, bool identity, const char* how)
@@ -743,7 +556,7 @@ bool learn_exact(uint32_t low, uint32_t high, uint32_t mip, bool chain, bool ide
         if (e.high == high || one == e.high) {
             if (e.high != high || !mip || e.mip) return true; // on file already
             e.mip = mip;
-            proven(low, high, mip);
+            proven(low);
             return true;
         }
         if (one == high) {
@@ -751,7 +564,7 @@ bool learn_exact(uint32_t low, uint32_t high, uint32_t mip, bool chain, bool ide
             e.high = high;
             e.mip = mip;
             e.chain = chain;
-            proven(low, high, mip);
+            proven(low);
             return true;
         }
         if (!identity) return false;
@@ -771,23 +584,24 @@ bool learn_exact(uint32_t low, uint32_t high, uint32_t mip, bool chain, bool ide
     k.exact = true;
     k.chain = chain;
     r.links.push_back(k);
-    proven(low, high, mip);
+    proven(low);
     return true;
 }
 
-bool learn_lookalike(uint32_t low, uint32_t high, uint32_t mip, float rmse_v, bool chain)
+bool learn_lookalike(uint32_t low, uint32_t high, uint32_t mip, float ssim, bool chain, bool place)
 {
     if (!low || !high || low == high || g_degenerate.count(low)) return false;
     auto rf = g_refuted.find(low);
     if (rf != g_refuted.end() && rf->second == high) return false;
-    if (exact_record(low) || mip_proven(high, mip)) return false;
+    if (exact_record(low)) return false;
     Rec& r = g_records[low];
     if (link_to(r, high)) return false;
     Link k;
     k.high = high;
     k.mip = mip;
     k.chain = chain;
-    k.rmse = rmse_v;
+    k.place = place;
+    k.ssim = ssim;
     r.links.push_back(k);
     mark_dirty();
     publish(low);
@@ -805,7 +619,7 @@ uint32_t below(uint32_t mip, uint32_t steps)
     return mip && steps ? mip + steps : 0;
 }
 
-void chain_alias(uint32_t id, uint32_t rule, int depth, bool look, uint32_t mip, float rmse_v)
+void chain_alias(uint32_t id, uint32_t rule, int depth, bool look, uint32_t mip, float ssim)
 {
     if (!id || !rule || id == rule || depth > 16) return;
     const bool degen = g_degenerate.count(id) != 0;
@@ -821,62 +635,15 @@ void chain_alias(uint32_t id, uint32_t rule, int depth, bool look, uint32_t mip,
             return;
         }
     } else {
-        const bool added = look ? learn_lookalike(id, rule, mip, rmse_v, true) : learn_exact(id, rule, mip, true, false, "lineage-chain");
+        const bool added = look ? learn_lookalike(id, rule, mip, ssim, true, false)
+                                : learn_exact(id, rule, mip, true, false, "lineage-chain");
         if (g_debug && added)
             logger::write("LINEAGE-CHAIN %08x -> %08x mip %u (%s: fed a mip of a texture that is that target)", id, rule, mip,
                 look ? "content-chain" : "lineage-chain");
     }
     auto it = g_feeders.find(id);
     if (it == g_feeders.end()) return;
-    for (const Feeder& f : it->second) chain_alias(f.low, rule, depth + 1, look, below(mip, f.steps), rmse_v);
-}
-
-uint32_t mip_of(const LodSig& big, const LodSig& sm)
-{
-    uint32_t k = 0;
-    for (uint32_t w = big.w; w > sm.w; w >>= 1) ++k;
-    return k;
-}
-
-void decide(uint32_t hash, const LodSig& stored)
-{
-    unsigned passed = 0;
-    for (auto& kv : g_sigs) {
-        if (!kv.second.is_target || !is_lod_parent(kv.second, stored)) continue;
-        float r;
-        if (!is_lod_match(kv.second, stored, r)) continue;
-        ++passed;
-        if (learn_lookalike(hash, kv.first, mip_of(kv.second, stored), r, false) && g_debug)
-            logger::trace("TexLod: %08x looks like %08x (%ux%u -> %ux%u, rmse=%.2f)", hash, kv.first, stored.w, stored.h,
-                kv.second.w, kv.second.h, r);
-    }
-    if (passed && exact_record(hash)) {
-        if (g_debug) logger::trace("TexLod: %08x matched %u target(s) by content, kept its exact record", hash, passed);
-        return;
-    }
-    if (passed || !g_debug) return;
-    int      ntgt = 0;
-    int      nparent = 0;
-    uint32_t cbest = 0;
-    float    crm = 1e9f;
-    float    cnc = 0;
-    float    cstdB = 0;
-    float    cstdS = sig_std(stored);
-    for (auto& kv : g_sigs) {
-        if (!kv.second.is_target) continue;
-        ++ntgt;
-        if (!is_lod_parent(kv.second, stored)) continue;
-        ++nparent;
-        float r = rmse(kv.second, stored);
-        if (r < crm) {
-            crm = r;
-            cnc = ncc(kv.second, stored);
-            cbest = kv.first;
-            cstdB = sig_std(kv.second);
-        }
-    }
-    if (DiagOnce("TEXLOD-NOMATCH", (int)hash)) logger::trace("TexLod: NO-MATCH %08x %ux%u | targets=%d parents=%d closest=%08x rmse=%.2f ncc=%.3f stdBig=%.1f stdSm=%.1f (need rmse<=%.0f ncc>=%.2f std>=%.0f)",
-        hash, stored.w, stored.h, ntgt, nparent, cbest, crm, cnc, cstdB, cstdS, RMSE_MAX, NCC_MIN, MIN_STD);
+    for (const Feeder& f : it->second) chain_alias(f.low, rule, depth + 1, look, below(mip, f.steps), ssim);
 }
 
 } // namespace
@@ -893,18 +660,18 @@ void TexLodFeeds(uint32_t lower, uint32_t big, uint32_t big_rule, uint32_t steps
     if (!rule) return;
     const bool look = !big_rule && !exact_record(big);
     uint32_t   mip = steps;
-    float      rmse_v = RMSE_UNMEASURED;
+    float      ssim = 0;
     if (!big_rule) {
         const Link& k = g_records.find(big)->second.links.front();
         mip = below(k.mip, steps);
-        rmse_v = k.rmse;
+        ssim = k.ssim;
     }
     if (g_debug && DiagOnce("LINEAGE-WALK", (int)lower))
         logger::write("LINEAGE-WALK %08x fed %08x (%s) -> rule %08x", lower, big,
             big_rule ? "a target" : look ? "look-alike record"
                                          : "exact record",
             rule);
-    chain_alias(lower, rule, 0, look, mip, rmse_v);
+    chain_alias(lower, rule, 0, look, mip, ssim);
 }
 
 static void load_all()
@@ -916,16 +683,15 @@ static void load_all()
     g_records.clear();
     g_degenerate.clear();
     if (!g_texlod_cache) {
-        g_sigs.clear();
         g_feeders.clear();
         publish_degenerate();
         for (uint32_t low : held) publish(low);
         logger::write("TexLod: texture match cache off (lod_cache=0) -- nothing read, learned or saved");
         return;
     }
-    int files = 0;
+    int          files = 0;
     load_file(cache_path(), files, g_records, g_degenerate);
-    normalize(g_records, g_degenerate);
+    const size_t old = normalize(g_records, g_degenerate);
     if (!g_cache_dir.empty()) {
         WIN32_FIND_DATAW sf;
         HANDLE           hs = FindFirstFileW((g_cache_dir + L"\\*.lodcache").c_str(), &sf);
@@ -941,7 +707,6 @@ static void load_all()
             FindClose(hs);
         }
     }
-    const size_t unproven = drop_lookalikes_of_proven();
     publish_degenerate();
     for (uint32_t low : held) publish(low); // one no file holds now leaves the table
     size_t everywhere = 0;
@@ -950,11 +715,11 @@ static void load_all()
         everywhere += exact(kv.second);
     }
     logger::trace("TexLod: loaded %zu LOD lows from %S%s: %zu swapped everywhere, %zu look-alike (%s), "
-                  "%zu degenerate (never swapped); %zu look-alike link(s) at a proven mip dropped; "
+                  "%zu degenerate (never swapped); %zu look-alike link(s) from before tex_look dropped; "
                   "checked at engine load",
         g_records.size() + g_degenerate.size(), cache_path().c_str(), files ? "" : " (none yet)", everywhere,
         g_records.size() - everywhere, g_texlod_resemblance ? "used" : "learned, not used", g_degenerate.size(),
-        unproven);
+        old);
 }
 
 void TexLodInit(const std::wstring& cache_dir)
@@ -1003,7 +768,6 @@ void TexLodTargetsReady(bool (*is_target)(uint32_t hash, void* user), void* user
         links.erase(std::remove_if(links.begin(), links.end(), [&](const Link& k) { return !is_target(k.high, user); }),
             links.end());
         if (links.empty()) {
-            g_sigs.erase(it->first); // signatures are once-per-texture; forget it so its next upload matches again
             dropped.push_back(it->first);
             it = g_records.erase(it);
             continue;
@@ -1011,7 +775,6 @@ void TexLodTargetsReady(bool (*is_target)(uint32_t hash, void* user), void* user
         if (links.size() != was) ++narrowed;
         ++it;
     }
-    if (folded) drop_lookalikes_of_proven();
     for (auto& kv : g_records) publish(kv.first);
     for (uint32_t low : dropped) publish(low);
     g_feeders.clear();
@@ -1029,7 +792,7 @@ void TexLodSetResemblance(bool on)
     size_t lookalike = 0;
     for (auto& kv : g_records) lookalike += !exact(kv.second);
     logger::write("TexLod: look-alike matches %s -- %zu look-alike low(s) %s", on ? "ON" : "OFF", lookalike,
-        on ? "now used in draws of a mod that declares their target" : "learned, not used");
+        on ? "now swapped like exact ones" : "learned, not used");
 }
 
 void TexLodFlushIfQuiet(unsigned quiet_ms)
@@ -1067,13 +830,7 @@ void TexLodRefute(uint32_t low, uint32_t high, const char* why)
 }
 
 namespace {
-struct Pick {
-    const Entry* e = nullptr;
-    uint32_t     high = 0;
-};
-std::shared_mutex                  g_pick_mtx;
-std::unordered_map<uint64_t, Pick> g_pick; // (low, draw's namespace) -> what it picked from which entry
-uint32_t                           everywhere(const Entry* e)
+uint32_t exact_high(const Entry* e)
 {
     return e && e->exact ? e->highs.front() : 0;
 }
@@ -1081,42 +838,18 @@ uint32_t                           everywhere(const Entry* e)
 
 uint32_t TexLodLookup(uint32_t hash)
 {
-    return g_texlod_alias_off ? 0 : everywhere(entry_of(hash)); // no lock: see g_tab
-}
-uint32_t TexLodLookupOwned(uint32_t hash, const wchar_t* ns, bool (*owns)(uint32_t high, const wchar_t* ns))
-{
-    if (g_texlod_alias_off || !hash || !ns || !*ns || !owns) return 0;
-    const Entry* e = entry_of(hash);
-    if (!e || e->exact || !g_texlod_resemblance) return 0;
-    uint32_t fnv = 2166136261u;
-    for (const wchar_t* c = ns; *c; ++c) fnv = (fnv ^ (uint32_t)towlower(*c)) * 16777619u;
-    const uint64_t key = ((uint64_t)hash << 32) | fnv;
-    {
-        std::shared_lock l(g_pick_mtx);
-        auto             p = g_pick.find(key);
-        if (p != g_pick.end() && p->second.e == e) return p->second.high;
-    }
-    uint32_t pick = 0;
-    int      owned = 0;
-    for (uint32_t h : e->highs)
-        if (owns(h, ns)) {
-            pick = h;
-            ++owned;
-        }
-    if (owned != 1) pick = 0;
-    {
-        std::unique_lock l(g_pick_mtx);
-        g_pick[key] = Pick{ e, pick };
-    }
-    logger::write("TexLod: LOOK-ALIKE %08x (%zu targets) for '%ls' -> %s %08x", hash, e->highs.size(), ns,
-        owned == 1 ? "its own target" : owned ? "REFUSED, it owns several, e.g."
-                                              : "REFUSED, it owns none",
-        pick);
-    return pick;
+    if (g_texlod_alias_off) return 0;
+    const Entry* e = entry_of(hash); // no lock: see g_tab
+    if (!e || e->exact) return exact_high(e);
+    return g_texlod_resemblance && e->highs.size() == 1 ? e->highs.front() : 0;
 }
 uint32_t TexLodKnown(uint32_t hash)
 {
-    return everywhere(entry_of(hash)); // ungated by the A/B: membership and dedupe, never a swap
+    return exact_high(entry_of(hash)); // ungated by the A/B: membership and dedupe, never a swap
+}
+bool TexLodLinked(uint32_t hash)
+{
+    return entry_of(hash) != nullptr;
 }
 bool TexLodDegenerate(uint32_t hash)
 {
@@ -1138,44 +871,33 @@ uint32_t TexLodAddMipExact(uint32_t low, uint32_t high, unsigned mip, bool* now_
     }
     auto it = g_feeders.find(low); // what fed `low` is `high` at a lower resolution too
     if (it != g_feeders.end())
-        for (const Feeder& f : it->second) chain_alias(f.low, high, 0, false, below(mip, f.steps), RMSE_UNMEASURED);
+        for (const Feeder& f : it->second) chain_alias(f.low, high, 0, false, below(mip, f.steps), 0);
     return prev;
 }
 
-std::vector<uint8_t> TexLodSampleOf(const uint8_t* bc, size_t bc_size, uint32_t w, uint32_t h, uint32_t fmt)
+bool TexLodLearnVisual(uint32_t low, uint32_t high, float ssim)
 {
-    if (!bc || !DxgiIsBc(fmt) || (uint64_t)w * h < 256ull * 256ull) return {};
-    const LodSig s = make_sig(fmt, bc, bc_size, w, h, false);
-    return std::vector<uint8_t>(s.v, s.v + sizeof s.v);
+    std::lock_guard l(g_mtx);
+    return g_texlod_cache && learn_lookalike(low, high, 0, ssim, false, false);
 }
 
-void TexLodOnSample(uint32_t hash, const std::vector<uint8_t>& sample, uint32_t w, uint32_t h, uint32_t fmt, bool is_target)
+bool TexLodExport(const std::wstring& path, bool (*keep)(uint32_t high, void* user), void* user)
 {
-    if (sample.size() != sizeof(LodSig::v) || !DxgiIsBc(fmt) || (uint64_t)w * h < 256ull * 256ull) return;
+    struct Keep {
+        bool (*keep)(uint32_t, void*);
+        void* user;
+    } k{ keep, user };
     std::lock_guard l(g_mtx);
-    if (!g_texlod_cache) return;
-    auto ex = g_sigs.find(hash);
-    if (ex != g_sigs.end()) { // once per texture
-        if (is_target) ex->second.is_target = true;
-        return;
-    }
-    LodSig sig;
-    memcpy(sig.v, sample.data(), sizeof sig.v);
-    sig.w = w;
-    sig.h = h;
-    sig.fmt = fmt;
-    sig.is_target = is_target;
-    auto& stored = g_sigs.emplace(hash, sig).first->second;
+    return write_records(
+        path, [](const Link& link, void* u) {
+            const Keep* k = static_cast<const Keep*>(u);
+            return link.exact && k->keep(link.high, k->user);
+        },
+        &k);
+}
 
-    if (is_target) { // a new LOD0 target: every lower-res texture already seen that looks like it
-        for (auto& kv : g_sigs) {
-            if (kv.first == hash || kv.second.is_target || !is_lod_parent(stored, kv.second)) continue;
-            float r;
-            if (!is_lod_match(stored, kv.second, r)) continue;
-            if (learn_lookalike(kv.first, hash, mip_of(stored, kv.second), r, false) && g_debug)
-                logger::trace("TexLod: %08x looks like %08x (%ux%u -> %ux%u, rmse=%.2f, late)", kv.first, hash,
-                    kv.second.w, kv.second.h, w, h, r);
-        }
-    } else
-        decide(hash, stored);
+bool TexLodLearnPlace(uint32_t low, uint32_t high)
+{
+    std::lock_guard l(g_mtx);
+    return g_texlod_cache && learn_lookalike(low, high, 0, 1.f, false, true);
 }

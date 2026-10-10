@@ -50,7 +50,7 @@
       <ConformanceMode>false</ConformanceMode>
       <AdditionalOptions>/permissive %(AdditionalOptions)</AdditionalOptions>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
-      <ExceptionHandling>Sync</ExceptionHandling>
+      <ExceptionHandling>Async</ExceptionHandling>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <ForcedIncludeFiles>$(WwmiRoot)reshade_addon\migoto\port_compat.h</ForcedIncludeFiles>
       <PreprocessorDefinitions>UNICODE;_UNICODE;_HAS_STD_BYTE=0;MIGOTO_DX=11;PCRE2_CODE_UNIT_WIDTH=8;PCRE2_STATIC;CRC32C_STATIC;_CRT_SECURE_CPP_OVERLOAD_STANDARD_NAMES=1;_CRT_SECURE_CPP_OVERLOAD_STANDARD_NAMES_COUNT=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>

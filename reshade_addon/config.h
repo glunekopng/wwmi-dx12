@@ -7,8 +7,10 @@
 // ---- master -----------------------------------------------------------------------------------
 inline std::atomic<bool> g_addon_disabled{ false }; // every hot handler early-outs: A/B against vanilla
 inline std::atomic<bool> g_rt_blocked{ false };     // the game ray traces and this build has no RT module: off until restart
+inline std::atomic<bool> g_faulted{ false };        // a guarded handler faulted (crash_handler.cpp): off until restart
 inline std::wstring      g_cso_dir;                 // where our compiled shaders live
 inline std::wstring      g_shader_cache_dir;        // patched shaders kept across launches; empty = no cache
+inline std::wstring      g_data_dir;                // <Win64>\wwmi_dx12: our caches and crawls; empty = none
 
 // ---- injection --------------------------------------------------------------------------------
 inline bool                  g_disable_vb = false;
@@ -113,7 +115,7 @@ inline bool                  g_sk_u1_by_identity = true; // resolve u1 by declar
 inline bool                  g_tex_lineage = true;
 inline std::atomic<uint32_t> g_tex_lineage_count{ 0 };
 inline bool                  g_texlod_alias_off = false;
-inline bool                  g_texlod_resemblance = false; // A13 / ini lod_resemblance: look-alike LOD matches applied (always learned)
+inline bool                  g_texlod_resemblance = true;  // A13 / ini lod_resemblance: look-alike LOD matches applied (always learned)
 inline bool                  g_texlod_cache = true;        // A14 / ini lod_cache: LOD matches learned, kept and used; off: none read, learned or written
 inline bool                  g_mip_exact = true;
 inline bool                  g_dump_degenerates = false; // D15: each degenerate LOD low as <dump dir>\degenerates\<hash>.dds

@@ -86,7 +86,7 @@ void PublishGameTexturesForDump(command_list* cmd_list)
             ID3D12Resource* res = ri.res;
             uint32_t        hash = chash;
             const char*     src = "GAME";
-            if (const uint32_t asset = TexLodTargetOf(chash, nullptr)) hash = asset;
+            if (const uint32_t asset = TexLodTargetOf(chash)) hash = asset;
             const uint32_t rule = swap_live && chash ? TexRuleHashFor(chash) : 0;
             const bool     rep_now = rule && TexReplacement(rule).ptr != 0;
             if (ri.swapped) {

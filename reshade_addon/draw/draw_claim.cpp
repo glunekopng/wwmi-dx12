@@ -378,7 +378,10 @@ std::optional<bool> ClaimDraw(const DrawArgs& da, BoneRoots& roots, DrawClaim& d
                         ci, vs_hash, first_index, index_count);
                 }
             }
-            if (is_mod_char || char_vb || char_ibset) g_geomods[md].last_char_frame = g_frame_id;
+            if (is_mod_char || char_vb || char_ibset) {
+                g_geomods[md].last_char_frame = g_frame_id;
+                for (const int s : g_merged_comps[mc_slot].with) g_geomods[g_merged_comps[s].mod_id].last_char_frame = g_frame_id;
+            }
             if (g_debug && (is_mod_char || char_vb || char_ibset)) { // RTDBG: see RtNoteDrawVb
                 RtDrawVb v;
                 v.frame = g_frame_id;

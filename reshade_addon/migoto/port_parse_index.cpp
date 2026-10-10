@@ -463,6 +463,63 @@ bool NamespaceForIni(const wchar_t* abs_ini_path, wchar_t* out, size_t out_chars
     return true;
 }
 
+static std::vector<std::wstring> IncludeRecursiveRoots(const std::wstring& d3dx_ini)
+{
+    std::vector<wchar_t> buf(4096);
+    DWORD                n = 0;
+    for (;;) {
+        n = GetPrivateProfileSectionW(L"Include", buf.data(), (DWORD)buf.size(), d3dx_ini.c_str());
+        if (n + 2 < buf.size()) break;
+        buf.resize(buf.size() * 2);
+    }
+    auto trim = [](std::wstring s) {
+        const size_t a = s.find_first_not_of(L" \t");
+        const size_t b = s.find_last_not_of(L" \t");
+        return a == std::wstring::npos ? std::wstring() : s.substr(a, b - a + 1);
+    };
+    std::vector<std::wstring> roots;
+    for (const wchar_t* p = buf.data(); p < buf.data() + n && *p; p += wcslen(p) + 1) {
+        const std::wstring line(p);
+        const size_t       eq = line.find(L'=');
+        if (eq == std::wstring::npos || trim(line.substr(0, eq)) != L"include_recursive") continue;
+        std::wstring root = trim(line.substr(eq + 1));
+        for (auto& ch : root)
+            if (ch == L'/') ch = L'\\';
+        while (!root.empty() && root.back() == L'\\') root.pop_back();
+        if (!root.empty()) roots.push_back(root);
+    }
+    return roots;
+}
+
+void ForEachModIni(void (*cb)(const wchar_t*, const wchar_t*, const wchar_t*, void*), void* user)
+{
+    if (!g_loaded || !cb) return;
+    std::lock_guard<std::recursive_mutex> engine_lk(EngineLock());
+    wchar_t                               base[MAX_PATH] = {};
+    MigotoPort::MigotoDir(base, MAX_PATH);
+    struct Ctx {
+        std::wstring              dir;
+        std::vector<std::wstring> roots;
+        void (*cb)(const wchar_t*, const wchar_t*, const wchar_t*, void*);
+        void* user;
+    } ctx{ base, IncludeRecursiveRoots(std::wstring(base) + L"d3dx.ini"), cb, user };
+    PortForEachIniFile(
+        [](const std::wstring& rel, const std::wstring& ns, void* u) {
+            const Ctx*   c = static_cast<const Ctx*>(u);
+            std::wstring path = rel;
+            for (auto& ch : path)
+                if (ch == L'/') ch = L'\\';
+            for (const auto& root : c->roots) {
+                if (path.size() <= root.size() + 1 || path[root.size()] != L'\\' ||
+                    _wcsnicmp(path.c_str(), root.c_str(), root.size()) != 0)
+                    continue;
+                c->cb((c->dir + path).c_str(), ns.c_str(), (c->dir + root).c_str(), c->user);
+                return;
+            }
+        },
+        &ctx);
+}
+
 void ForEachTextureOverride(void (*cb)(uint32_t, const wchar_t*, bool, const wchar_t*, void*), void* user)
 {
     std::lock_guard<std::recursive_mutex> engine_lk(EngineLock());

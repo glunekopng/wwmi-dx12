@@ -13,6 +13,7 @@
 #include "dx12_context.h"
 #include "dx12_wrap.h"
 #include "dx12_pipeline.h"
+#include "port_toggles.h" // g_buffers_in_vram
 #include "prof_core.h" // ProfGpuWork -- views created, for the dump's RECORDED ON D3D12 rows
 #include "../../src/log.h"
 #include "../../src/d3d12_buffer.h"
@@ -100,22 +101,20 @@ HRESULT STDMETHODCALLTYPE Dx12Device::CreateBuffer(const D3D11_BUFFER_DESC* pDes
     }
 
     D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
-    ID3D12Resource*       res = CreateBufferDx12(pDesc->ByteWidth, true, state, pInitialData != nullptr && !uav);
+    const bool            host = !g_buffers_in_vram && pInitialData != nullptr && !uav;
+    ID3D12Resource*       res = CreateBufferDx12(pDesc->ByteWidth, true, state, host);
     if (!res) {
         NotImplOnce("Device::CreateBuffer (no DX12 device bound, or creation failed)");
         return E_FAIL;
     }
-    if (pInitialData && pInitialData->pSysMem) {
-        if (uav) {
+    if (host && pInitialData->pSysMem) {
+        void*       dst = nullptr;
+        D3D12_RANGE none{ 0, 0 };
+        if (SUCCEEDED(res->Map(0, &none, &dst)) && dst) {
+            memcpy(dst, pInitialData->pSysMem, pDesc->ByteWidth);
+            res->Unmap(0, nullptr);
         } else {
-            void*       dst = nullptr;
-            D3D12_RANGE none{ 0, 0 };
-            if (SUCCEEDED(res->Map(0, &none, &dst)) && dst) {
-                memcpy(dst, pInitialData->pSysMem, pDesc->ByteWidth);
-                res->Unmap(0, nullptr);
-            } else {
-                logger::write("PORT: CreateBuffer initial data -- Map FAILED (%u bytes)", pDesc->ByteWidth);
-            }
+            logger::write("PORT: CreateBuffer initial data -- Map FAILED (%u bytes)", pDesc->ByteWidth);
         }
     }
 
@@ -124,7 +123,7 @@ HRESULT STDMETHODCALLTYPE Dx12Device::CreateBuffer(const D3D11_BUFFER_DESC* pDes
     w->state = state;
     w->desc = *pDesc;
     PortNormalizeBufferDesc(w->desc); // match D3D11 GetDesc (see PortNormalizeBufferDesc note)
-    if (uav && pInitialData && pInitialData->pSysMem)
+    if (!host && pInitialData && pInitialData->pSysMem)
         QueueUpload(w, pInitialData->pSysMem, pDesc->ByteWidth);
     if (ppBuffer)
         *ppBuffer = w;

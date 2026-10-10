@@ -4,6 +4,7 @@
 #include "IniHandler.h"
 #include "CommandList.h"
 #include "dx12_wrap.h"
+#include "dx12_pipeline.h"
 #include "port_keygate.h"
 #include <DDSTextureLoader.h>
 #include "../../src/log.h"
@@ -153,7 +154,6 @@ bool GetBufferResource(const wchar_t* fq_name, BufferResourceInfo* out)
 
     out->dx12 = wr->dx12;
     out->gpu_va = (unsigned long long)wr->dx12->GetGPUVirtualAddress() + wr->gpu_va;
-    out->mappable = (wr->heap_type == D3D12_HEAP_TYPE_UPLOAD);
 
     if (auto* wb = static_cast<MigotoPort::WrapBuffer*>(wr)) {
         out->byte_width = wb->desc.ByteWidth;
@@ -161,6 +161,40 @@ bool GetBufferResource(const wchar_t* fq_name, BufferResourceInfo* out)
     }
     if (it->second.stride) out->stride = it->second.stride;
     if (!out->byte_width && it->second.buf_size) out->byte_width = it->second.buf_size;
+    return true;
+}
+
+size_t BufferInitialData(const wchar_t* fq_name, void* out, size_t cap)
+{
+    std::lock_guard<std::recursive_mutex> engine_lk(EngineLock());
+    if (!g_loaded || !fq_name || !out) return 0;
+    auto it = customResources.find(fq_name);
+    if (it == customResources.end() || !it->second.initial_data) return 0;
+    const size_t n = (std::min)(cap, it->second.initial_data_size);
+    memcpy(out, it->second.initial_data, n);
+    return n;
+}
+
+bool UploadBufferResource(const wchar_t* fq_name, const void* data, size_t bytes)
+{
+    std::lock_guard<std::recursive_mutex> engine_lk(EngineLock());
+    if (!g_loaded || !fq_name || !data || !bytes) return false;
+    auto it = customResources.find(fq_name);
+    if (it == customResources.end()) return false;
+    MigotoPort::WrapResource* wr = MigotoPort::AsWrapResource(it->second.resource);
+    if (!wr || !wr->dx12 || wr->dim != D3D11_RESOURCE_DIMENSION_BUFFER) return false;
+    D3D12_HEAP_PROPERTIES hp{};
+    D3D12_HEAP_FLAGS      hf{};
+    if (SUCCEEDED(wr->dx12->GetHeapProperties(&hp, &hf)) && hp.Type == D3D12_HEAP_TYPE_UPLOAD) {
+        void*             p = nullptr;
+        const D3D12_RANGE none{ 0, 0 };
+        if (FAILED(wr->dx12->Map(0, &none, &p)) || !p) return false;
+        memcpy(p, data, bytes);
+        const D3D12_RANGE wrote{ 0, bytes };
+        wr->dx12->Unmap(0, &wrote);
+        return true;
+    }
+    MigotoPort::QueueUpload(it->second.resource, data, bytes);
     return true;
 }
 

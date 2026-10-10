@@ -98,8 +98,7 @@ void PortProbeTick(command_queue* queue, swapchain* sc)
         PortApi::SetFrameContext(dev12, nullptr, q12, 0, 0,
             DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN,
             nullptr, D3D12_RESOURCE_STATE_COMMON, nullptr);
-        const std::wstring ini_root = fs::path(g_mods_dir).parent_path().wstring();
-        const bool         ok = PortApi::Load(ini_root.c_str());
+        const bool ok = PortApi::Load(g_wwmi_dir.c_str());
         {
             const auto cso = WwmiReadFile((g_cso_dir + L"\\BufCopy.cso").c_str());
             if (cso.empty())

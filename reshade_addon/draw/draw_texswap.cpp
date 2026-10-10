@@ -87,6 +87,38 @@ const ReadSlots& DrawReadSlots(reshade::api::command_list* cmd_list)
     return m.rs;
 }
 
+// A mod a claimed draw runs: detected (`$object_detected`) and its textures wanted now.
+static void NoteClaimedMod(int mod_id)
+{
+    if (mod_id < 0 || mod_id >= (int)g_geomods.size()) return;
+    const std::wstring& det_ns = g_geomods[mod_id].wcl_ns;
+    if (det_ns.empty()) return;
+    PROF(PROF_TH_Detect);
+    struct DetSlot {
+        unsigned gen = ~0u;
+        float*   slot = nullptr;
+    };
+    thread_local std::vector<DetSlot> t_det;
+    if (t_det.size() < g_geomods.size()) t_det.resize(g_geomods.size());
+    DetSlot&       ds = t_det[mod_id];
+    const unsigned gen = PortApi::LoadGeneration();
+    if (ds.gen != gen || (ds.slot && !PortApi::VarSlotHolds(ds.slot, gen, 1.f))) {
+        std::optional<PortApi::EngineScope> det_scope;
+        {
+            PROF(PROF_TH_DetLock);
+            det_scope.emplace();
+        }
+        const unsigned held_gen = PortApi::LoadGeneration();
+        if (ds.gen != held_gen) {
+            ds.slot = PortApi::VarSlotNs(det_ns.c_str(), L"object_detected");
+            ds.gen = held_gen;
+        }
+        PortApi::SetVarSlot(ds.slot, 1.f);
+    }
+    TexTiming::NoteClaimed(mod_id, det_ns.c_str());
+    g_tex_eager.OnClaimed(mod_id, det_ns.c_str(), "first claimed draw");
+}
+
 void StampClaimedTextures(const DrawArgs& da, DrawClaim& dc)
 {
     reshade::api::command_list* const cmd_list = da.cmd_list;
@@ -97,36 +129,10 @@ void StampClaimedTextures(const DrawArgs& da, DrawClaim& dc)
     if (mc && g_texovr_ready && !g_disable_tex) {
         PROF(PROF_DI_TexHash);
         const wchar_t* own_ns = nullptr;
-        if (mc->mod_id >= 0 && mc->mod_id < (int)g_geomods.size()) {
-            const std::wstring& det_ns = g_geomods[mc->mod_id].wcl_ns;
-            own_ns = det_ns.empty() ? nullptr : det_ns.c_str();
-            if (!det_ns.empty()) {
-                PROF(PROF_TH_Detect);
-                struct DetSlot {
-                    unsigned gen = ~0u;
-                    float*   slot = nullptr;
-                };
-                thread_local std::vector<DetSlot> t_det;
-                if (t_det.size() < g_geomods.size()) t_det.resize(g_geomods.size());
-                DetSlot&       ds = t_det[mc->mod_id];
-                const unsigned gen = PortApi::LoadGeneration();
-                if (ds.gen != gen || (ds.slot && !PortApi::VarSlotHolds(ds.slot, gen, 1.f))) {
-                    std::optional<PortApi::EngineScope> det_scope;
-                    {
-                        PROF(PROF_TH_DetLock);
-                        det_scope.emplace();
-                    }
-                    const unsigned held_gen = PortApi::LoadGeneration();
-                    if (ds.gen != held_gen) {
-                        ds.slot = PortApi::VarSlotNs(det_ns.c_str(), L"object_detected");
-                        ds.gen = held_gen;
-                    }
-                    PortApi::SetVarSlot(ds.slot, 1.f);
-                }
-                TexTiming::NoteClaimed(mc->mod_id, det_ns.c_str());
-                g_tex_eager.OnClaimed(mc->mod_id, det_ns.c_str(), "first claimed draw");
-            }
-        }
+        if (mc->mod_id >= 0 && mc->mod_id < (int)g_geomods.size() && !g_geomods[mc->mod_id].wcl_ns.empty())
+            own_ns = g_geomods[mc->mod_id].wcl_ns.c_str();
+        NoteClaimedMod(mc->mod_id);
+        for (const int s : mc->with) NoteClaimedMod(g_merged_comps[s].mod_id);
         ProfScope   _th_prep(PROF_TH_Prep);
         auto*       dev = reinterpret_cast<ID3D12Device*>(cmd_list->get_device()->get_native());
         uint32_t    inc = dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
@@ -288,7 +294,7 @@ void StampClaimedTextures(const DrawArgs& da, DrawClaim& dc)
                     }
                 }
                 if (rep.ptr == 0) {
-                    const uint32_t      tgt = TexLodTargetOf(hash, own_ns);
+                    const uint32_t      tgt = TexLodTargetOf(hash);
                     ModLoader::TexEntry alias_entry;
                     if (tgt && ModLoader::TexEntryAt(TexSelectIdxNs(tgt, own_ns), &alias_entry)) {
                         rep = alias_entry.srv;
