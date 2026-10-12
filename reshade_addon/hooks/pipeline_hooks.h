@@ -9,6 +9,12 @@ void PsoBoundHashes(uint64_t pso, uint64_t* vs_or_cs, uint64_t* ps, uint64_t* gs
 // The PSO's decensor-only variant, lock-free; 0 = none (yet). The first ask queues the build.
 uint64_t PsoDecensorVariant(reshade::api::device* dev, uint64_t pso);
 void     PsoSetDecensorVariant(uint64_t pso, uint64_t variant);
+// The PSO's UID-cut variant for a back buffer of `target` (UidHide::Target), lock-free; 0 = none (yet), or the
+// PSO does not draw UI text. The first ask for a target queues the build.
+uint64_t PsoUidVariant(reshade::api::device* dev, uint64_t pso, uint32_t target);
+void     PsoSetUidVariant(uint64_t pso, uint32_t target, uint64_t variant);
+// The ps-tN its pixel shader may read, bit r for t0..t63 (DxilSrvRegs::reads), lock-free; all set when unknown.
+uint64_t PipelinePsReadMask(uint64_t pso);
 // A copy of the set for `pso` / stage ('p' or 'v'), under the guard; an unparsed default when unknown.
 DxilSrvRegs PipelineSrvRegs(uint64_t pso, char stage);
 bool        PipelineVsCbufferBytes(uint64_t pso, unsigned reg, uint32_t& bytes);

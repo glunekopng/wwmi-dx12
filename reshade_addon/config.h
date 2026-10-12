@@ -33,6 +33,7 @@ inline bool                  g_dump_game_textures = true; // frame dump includes
 inline bool                  g_shader_replace = false;    // swap a game shader for one of ours by hash
 
 inline bool              g_decensor = false;
+inline bool              g_hide_uid = false;         // A5: the UID cut out of the UI text (hud/uid_hide.h)
 inline std::wstring      g_addon_ini_path;           // wwmi_dx12.ini, read at startup and written back by the overlay
 inline bool              g_skip_engine_tick = false; // A9: perf A/B only -- no [Present] lists, no present pass; mods stop updating
 inline bool              g_hide_outline = false;

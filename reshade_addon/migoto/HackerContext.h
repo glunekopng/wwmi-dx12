@@ -8,6 +8,7 @@ DEFINE_GUID(IID_HackerContext,
 #include "dx12_context.h" // MigotoPort::Context(): the DX11->DX12 transition layer
 
 class HackerDevice;
+class HackerInputLayout;
 
 class HackerContext {
 public:
@@ -50,14 +51,14 @@ public:
 
     ID3D11Buffer* GetReadbackBuffer(UINT /*size*/) { return nullptr; }
 
-    void DeferInputLayoutOverride(class HackerInputLayout* /*pInputLayout*/) {}
-    void OverrideInputLayout() {}
-    void RestoreInputLayout() {}
+    unsigned long long mDrawPipeline = 0;
+    HackerInputLayout* mOverrideInputLayout = nullptr;
 
-    void STDMETHODCALLTYPE IAGetInputLayout(ID3D11InputLayout** ppInputLayout)
-    {
-        if (ppInputLayout) *ppInputLayout = nullptr;
-    }
+    void DeferInputLayoutOverride(HackerInputLayout* pInputLayout);
+    void OverrideInputLayout();
+    void RestoreInputLayout();
+
+    void STDMETHODCALLTYPE IAGetInputLayout(ID3D11InputLayout** ppInputLayout);
 
     HRESULT STDMETHODCALLTYPE Map(ID3D11Resource* pResource, UINT Subresource, D3D11_MAP MapType,
         UINT MapFlags, D3D11_MAPPED_SUBRESOURCE* pMappedResource)

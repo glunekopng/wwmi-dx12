@@ -3,17 +3,11 @@
 // recording is the add-on's.
 //
 // Every registered ReShade handler runs inside a HotPath::Scope (HP() at registration), which times it
-// exclusive of nested handlers and charges it to the command list the handler was given (a handler with
-// no list is charged to its thread, outside any list). Each list keeps one record per recording, Reset to
-// Close, by handler and by profiler row; at ExecuteCommandLists each submitted list's last closed record
-// is matched to the submission. At frame end the submissions are grouped; the list from another thread
-// that closed last in each is the one the submitting thread waited for. A profiler dump session writes
-// the summary into the dump; a trace that enables the WWMI-DX12-HotPath provider gets ListReset /
-// ListClose / Execute / Frame events to join with its CSwitch and ReadyThread (tools/hot_path_etw.py).
-// Debug build only; idle unless one of the two is on.
+// exclusive of nested handlers and charges it to the command list the handler was given. A trace that
+// enables the WWMI-DX12-HotPath provider gets ListReset / ListClose / Execute / Frame events to join with
+// its CSwitch and ReadyThread (tools/hot_path_etw.py). Debug build only; idle unless a trace enables it.
 #include <atomic>
 #include <cstdint>
-#include <cstdio>
 #include <type_traits>
 #include <windows.h>
 
@@ -103,9 +97,7 @@ void OnReset(reshade::api::command_list* cl);
 void OnClose(reshade::api::command_list* cl);
 void OnExecute(reshade::api::command_queue* queue, reshade::api::command_list* cl);
 void NoteClaimed();
-void FrameEnd(bool dump_active);
-void SessionStart();
-void Report(FILE* f, int frames);
+void FrameEnd();
 
 inline reshade::api::command_list* ListArg()
 {
@@ -181,9 +173,7 @@ inline void  OnReset(reshade::api::command_list*) {}
 inline void  OnClose(reshade::api::command_list*) {}
 inline void  OnExecute(reshade::api::command_queue*, reshade::api::command_list*) {}
 inline void  NoteClaimed() {}
-inline void  FrameEnd(bool) {}
-inline void  SessionStart() {}
-inline void  Report(FILE*, int) {}
+inline void  FrameEnd() {}
 inline void  GpuNoteBarriers(uint32_t) {}
 inline void* GpuBracketBegin(ID3D12GraphicsCommandList*, int)
 {

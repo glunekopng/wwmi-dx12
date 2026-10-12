@@ -91,6 +91,15 @@ bool AnalyseFrameStart()
     return true;
 }
 
+void CopyAddonLogIntoCapture()
+{
+    if (!G->ANALYSIS_PATH[0]) return;
+    wchar_t dst[MAX_PATH];
+    _snwprintf_s(dst, MAX_PATH, _TRUNCATE, L"%s\\addon.log", G->ANALYSIS_PATH);
+    const DWORD err = logger::copy_to(dst);
+    if (err) logger::write("FRAMEANALYSIS: could not copy the addon log into the capture (err %u)", err);
+}
+
 // PORTED from HackerDXGI.cpp RunFrameActions :214-228.
 void AnalyseFrameStopAtBoundary()
 {
@@ -102,6 +111,7 @@ void AnalyseFrameStopAtBoundary()
         G->analyse_frame = false;
         logger::write("FRAMEANALYSIS: frame analysis saved to %S", G->ANALYSIS_PATH);
         DumpWatchdogStop();
+        CopyAddonLogIntoCapture();
     }
 }
 
@@ -174,6 +184,7 @@ void AbortCaptureAfterFault(const EngineFault& f)
     ReleaseIfHeldByThisThread(G->mResourcesLock, "G->mResourcesLock");
     G->analyse_frame = false;
     DumpWatchdogStop();
+    CopyAddonLogIntoCapture();
 }
 
 } // namespace

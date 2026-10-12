@@ -4,6 +4,8 @@
 #include <d3d11.h> // D3D11_BLEND_DESC: the state-only [CustomShader] seam hands over the PARSED desc
 #include <unordered_map>
 #include <unordered_set>
+#include <set>
+#include <utility>
 #include <deque>
 #include <mutex>
 #include <condition_variable>
@@ -66,17 +68,59 @@ static CodeBlob                                                                P
     return b;
 }
 // A variant remembers its SOURCE so PsoCloneForget can find it under the composite key.
-struct BlendVariant {
+struct PsoVariant {
     uint64_t             src;
     ID3D12PipelineState* pso;
 };
-static std::unordered_map<uint64_t, BlendVariant> g_blend_variant; // (src^blendkey) -> variant
-static std::mutex                                 g_blend_variant_mtx;
+static std::unordered_map<uint64_t, PsoVariant> g_blend_variant; // (src^blendkey) -> variant
+static std::mutex                               g_blend_variant_mtx;
+static std::unordered_map<uint64_t, PsoVariant> g_layout_variant; // (src^layoutkey) -> variant; pso nullptr = could not be made
+static std::mutex                               g_layout_variant_mtx;
 // Sources whose clone was missing when a variant was asked for, logged once each (under the variant mutex).
 static std::unordered_set<uint64_t> g_blend_miss_logged;
 // Source PSO -> its decensored pixel shader, once the decensor-only variant has settled with a patch.
 static std::unordered_map<uint64_t, CodeBlob> g_decensor_ps;
 static std::mutex                             g_decensor_ps_mtx;
+// Source PSO | decensor << 60 -> its RabbitFX-patched pixel shader, once that variant has settled.
+static std::unordered_map<uint64_t, CodeBlob> g_rfx_ps;
+static std::mutex                             g_rfx_ps_mtx;
+
+static CodeBlob DecensoredPs(uint64_t src_pso)
+{
+    std::lock_guard l(g_decensor_ps_mtx);
+    auto            it = g_decensor_ps.find(src_pso);
+    return it == g_decensor_ps.end() ? nullptr : it->second;
+}
+
+static CodeBlob RfxPatchedPs(uint64_t src_pso, bool decensor)
+{
+    std::lock_guard l(g_rfx_ps_mtx);
+    auto            it = g_rfx_ps.find(src_pso | ((uint64_t)decensor << 60));
+    return it == g_rfx_ps.end() ? nullptr : it->second;
+}
+
+static void ForgetPatchedPs(uint64_t src_pso)
+{
+    {
+        std::lock_guard d(g_decensor_ps_mtx);
+        g_decensor_ps.erase(src_pso);
+    }
+    std::lock_guard r(g_rfx_ps_mtx);
+    g_rfx_ps.erase(src_pso);
+    g_rfx_ps.erase(src_pso | (1ull << 60));
+}
+
+static void SwapPixelShader(std::vector<pipeline_subobject>& subs, const CodeBlob& ps, shader_desc& storage)
+{
+    for (auto& so : subs)
+        if (so.type == pipeline_subobject_type::pixel_shader && so.count == 1 && so.data) {
+            storage = *static_cast<const shader_desc*>(so.data);
+            storage.code = ps->data();
+            storage.code_size = ps->size();
+            so.data = &storage;
+            return;
+        }
+}
 
 static size_t SubobjElemSize(pipeline_subobject_type t)
 {
@@ -270,12 +314,8 @@ ID3D12PipelineState* GetBlendVariant(reshade::api::device* dev, uint64_t src_pso
     uint64_t   bkey = Fnv1a64(blend_mode.data(), blend_mode.size(), dbg ? 0xD000000000000001ULL : kFnv64Basis);
     bkey = (bkey ^ 0x5bd1e995u) * kFnv64Prime;
     bkey = Fnv1a64(alpha_mode.data(), alpha_mode.size(), bkey);
-    CodeBlob dps;
-    if (decensor) {
-        std::lock_guard l(g_decensor_ps_mtx);
-        if (auto it = g_decensor_ps.find(src_pso); it != g_decensor_ps.end()) dps = it->second;
-    }
-    uint64_t key = src_pso ^ (bkey * 2654435761ULL) ^ (dps ? 0x9E3779B97F4A7C15ULL : 0);
+    const CodeBlob dps = decensor ? DecensoredPs(src_pso) : nullptr;
+    uint64_t       key = src_pso ^ (bkey * 2654435761ULL) ^ (dps ? 0x9E3779B97F4A7C15ULL : 0);
     {
         std::lock_guard l(g_blend_variant_mtx);
         auto            it = g_blend_variant.find(key);
@@ -337,15 +377,7 @@ ID3D12PipelineState* GetBlendVariant(reshade::api::device* dev, uint64_t src_pso
     bd->blend_constant[3] = bf[3];
     subs[bidx].data = bd.get();
     shader_desc dps_desc{};
-    if (dps)
-        for (auto& so : subs)
-            if (so.type == pipeline_subobject_type::pixel_shader && so.count == 1 && so.data) {
-                dps_desc = *static_cast<const shader_desc*>(so.data);
-                dps_desc.code = dps->data();
-                dps_desc.code_size = dps->size();
-                so.data = &dps_desc;
-                break;
-            }
+    if (dps) SwapPixelShader(subs, dps, dps_desc);
 
     reshade::api::pipeline out = { 0 };
     bool                   ok = dev->create_pipeline(layout, (uint32_t)subs.size(), subs.data(), &out);
@@ -357,11 +389,96 @@ ID3D12PipelineState* GetBlendVariant(reshade::api::device* dev, uint64_t src_pso
             if (variant) dev->destroy_pipeline(out);
             return it->second.pso;
         }
-        g_blend_variant[key] = BlendVariant{ src_pso, variant };
+        g_blend_variant[key] = PsoVariant{ src_pso, variant };
     }
     logger::trace("CUSTOMBLEND variant src=%llx blend='%s' alpha='%s' iniFactor=%.2f,%.2f,%.2f,%.2f (factor dynamic) decensored=%d -> %s",
         src_pso, blend_mode.c_str(), alpha_mode.empty() ? "(=color)" : alpha_mode.c_str(), bf[0], bf[1], bf[2], bf[3], (int)(dps != nullptr),
         variant ? "OK" : "FAILED(create)");
+    return variant;
+}
+
+ID3D12PipelineState* GetInputLayoutVariant(reshade::api::device* dev, uint64_t src_pso,
+    const D3D11_INPUT_ELEMENT_DESC* elements, uint32_t count, bool decensor, bool rfx)
+{
+    if (!dev || !src_pso || !elements || !count) return nullptr;
+    uint64_t lkey = kFnv64Basis;
+    for (uint32_t i = 0; i < count; ++i) {
+        const D3D11_INPUT_ELEMENT_DESC& e = elements[i];
+        if (e.SemanticName) lkey = Fnv1a64(e.SemanticName, strlen(e.SemanticName), lkey);
+        const uint32_t v[3] = { e.SemanticIndex, (uint32_t)e.Format, e.AlignedByteOffset };
+        lkey = Fnv1a64(v, sizeof v, lkey);
+    }
+    const CodeBlob dps = rfx ? RfxPatchedPs(src_pso, decensor) : decensor ? DecensoredPs(src_pso) : nullptr;
+    if (rfx && !dps) return nullptr;
+    const uint64_t salt = !dps ? 0
+        : !rfx                 ? 0x9E3779B97F4A7C15ULL
+        : decensor             ? 0xD6E8FEB86659FD93ULL
+                               : 0xC2B2AE3D27D4EB4FULL;
+    const uint64_t key = src_pso ^ (lkey * 2654435761ULL) ^ salt;
+    {
+        std::lock_guard l(g_layout_variant_mtx);
+        if (auto it = g_layout_variant.find(key); it != g_layout_variant.end()) return it->second.pso;
+    }
+
+    pipeline_layout                 layout = {};
+    std::vector<pipeline_subobject> subs;
+    const char*                     why = nullptr;
+    {
+        std::lock_guard l(g_pso_clone_mtx);
+        auto            it = g_pso_clone.find(src_pso);
+        if (it == g_pso_clone.end()) {
+            why = "no clone of this PSO (created before the addon)";
+        } else {
+            layout = it->second.layout;
+            subs = it->second.subs;
+        }
+    }
+    int il = -1;
+    for (size_t s = 0; !why && s < subs.size(); ++s)
+        if (subs[s].type == pipeline_subobject_type::input_layout) il = (int)s;
+    if (!why && (il < 0 || subs[il].count != count || !subs[il].data))
+        why = "the PSO's input layout is not the one the override was made from";
+    std::vector<input_element> ie;
+    ID3D12PipelineState*       variant = nullptr;
+    if (!why) {
+        const auto* src = static_cast<const input_element*>(subs[il].data);
+        ie.assign(src, src + count);
+        for (uint32_t i = 0; i < count; ++i) {
+            ie[i].semantic = elements[i].SemanticName;
+            ie[i].semantic_index = elements[i].SemanticIndex;
+            ie[i].format = (format)elements[i].Format;
+            ie[i].offset = elements[i].AlignedByteOffset;
+        }
+        subs[il].data = ie.data();
+        shader_desc dps_desc{};
+        if (dps) SwapPixelShader(subs, dps, dps_desc);
+        reshade::api::pipeline out = { 0 };
+        if (dev->create_pipeline(layout, (uint32_t)subs.size(), subs.data(), &out))
+            variant = reinterpret_cast<ID3D12PipelineState*>(out.handle);
+        else
+            why = "create_pipeline failed";
+    }
+    {
+        std::lock_guard l(g_layout_variant_mtx);
+        if (auto it = g_layout_variant.find(key); it != g_layout_variant.end()) {
+            if (variant) dev->destroy_pipeline(reshade::api::pipeline{ reinterpret_cast<uint64_t>(variant) });
+            return it->second.pso;
+        }
+        g_layout_variant[key] = PsoVariant{ src_pso, variant };
+    }
+    char desc[512];
+    size_t n = 0;
+    desc[0] = 0;
+    for (uint32_t i = 0; i < count && n + 48 < sizeof desc; ++i) {
+        const int w = _snprintf_s(desc + n, sizeof desc - n, _TRUNCATE, " %s%u+%u:f%u",
+            elements[i].SemanticName ? elements[i].SemanticName : "?", elements[i].SemanticIndex,
+            elements[i].AlignedByteOffset, (unsigned)elements[i].Format);
+        if (w < 0) break;
+        n += (size_t)w;
+    }
+    logger::write("ILAYOUT variant src=%llx elems=%u ps=%s ->%s%s:%s", (unsigned long long)src_pso, count,
+        !dps ? "game" : rfx ? (decensor ? "rabbitfx+decensored" : "rabbitfx") : "decensored",
+        variant ? " OK" : " NONE, drawn with the game's layout -- ", variant ? "" : why, desc);
     return variant;
 }
 
@@ -374,15 +491,21 @@ static std::unordered_map<uint64_t, RfxpVariant> g_rfxp_variant; // src -> varia
 static std::unordered_set<uint64_t>              g_rfxp_miss_logged;
 static std::mutex                                g_rfxp_variant_mtx;
 struct RfxpJob {
-    reshade::api::device* dev;
-    uint64_t              src_pso0;
-    uint64_t              key;
-    bool                  decensor;
-    PsoClone              clone;
-    bool                  inject = true;
+    reshade::api::device*   dev;
+    uint64_t                src_pso0;
+    uint64_t                key;
+    bool                    decensor;
+    PsoClone                clone;
+    bool                    inject = true;
+    std::vector<RfxDxilCut> cuts;       // not empty: a UID-cut job (inject and decensor false)
+    uint32_t                target = 0; // its back buffer size, width << 16 | height
 };
 static std::deque<RfxpJob>          g_rfxp_queue;   // under g_rfxp_variant_mtx
 static std::unordered_set<uint64_t> g_rfxp_pending; // keys queued or in flight -- under g_rfxp_variant_mtx
+// UID-cut jobs: (source PSO, target) queued or in flight, and every variant made, until the source is destroyed.
+// Under g_rfxp_variant_mtx.
+static std::set<std::pair<uint64_t, uint32_t>>                 g_uid_pending;
+static std::unordered_multimap<uint64_t, ID3D12PipelineState*> g_uid_variants;
 static std::condition_variable      g_rfxp_cv;
 static std::atomic<bool>            g_rfxp_stop{ false };
 struct RfxpThread {
@@ -480,14 +603,27 @@ static void RfxPatchBuild(RfxpJob& job)
     const uint64_t              key = job.key;
     const bool                  decensor = job.decensor;
     const bool                  inject = job.inject;
+    const bool                  cut = !job.cuts.empty();
+    const char* const           label = cut ? "UIDCUT" : (inject ? "RFXPATCH" : "RFXDECENSOR");
     unsigned                    max_reg = 0;
     bool                        glow = false;
     CodeBlob                    dps;
+    CodeBlob                    pps;
     auto                        settle = [&](ID3D12PipelineState* v) {
         bool orphan = false;
         {
             std::lock_guard l(g_rfxp_variant_mtx);
-            if (!g_rfxp_pending.erase(key))
+            if (cut) {
+                if (!g_uid_pending.erase({ src_pso0, job.target }))
+                    orphan = true;
+                else {
+                    if (v) {
+                        g_uid_variants.emplace(src_pso0, v);
+                        ++g_rfxp_variants;
+                    }
+                    PsoSetUidVariant(src_pso0, job.target, reinterpret_cast<uint64_t>(v));
+                }
+            } else if (!g_rfxp_pending.erase(key))
                 orphan = true;
             else {
                 g_rfxp_variant[key] = RfxpVariant{ v, max_reg, v && glow };
@@ -497,10 +633,14 @@ static void RfxPatchBuild(RfxpJob& job)
                     std::lock_guard d(g_decensor_ps_mtx);
                     g_decensor_ps[src_pso0] = dps;
                 }
+                if (inject && v && pps) {
+                    std::lock_guard r(g_rfx_ps_mtx);
+                    g_rfx_ps[key] = pps;
+                }
             }
         }
         if (orphan && v) {
-            logger::write("RFXPATCH variant src=%llx decensor=%d: the source PSO was destroyed while its patch was in flight -- variant released", src_pso0, (int)decensor);
+            logger::write("%s variant src=%llx decensor=%d: the source PSO was destroyed while its patch was in flight -- variant released", label, src_pso0, (int)decensor);
             dev->destroy_pipeline(reshade::api::pipeline{ reinterpret_cast<uint64_t>(v) });
         }
     };
@@ -523,7 +663,8 @@ static void RfxPatchBuild(RfxpJob& job)
     const shader_desc src_ps = *static_cast<const shader_desc*>(ps_so->data);
     if (!src_ps.code || !src_ps.code_size) return settle(nullptr);
     const uint64_t ps_hash = Fnv1a64(src_ps.code, src_ps.code_size);
-    const uint64_t ps_key = ps_hash ^ (decensor ? 0x9E3779B97F4A7C15ull : 0) ^ (inject ? 0 : 0xC2B2AE3D27D4EB4Full); // the store holds every patch of a PS
+    const uint64_t ps_key = ps_hash ^ (decensor ? 0x9E3779B97F4A7C15ull : 0) ^ (inject ? 0 : 0xC2B2AE3D27D4EB4Full) ^
+        (cut ? Fnv1a64(job.cuts.data(), job.cuts.size() * sizeof(RfxDxilCut)) : 0); // the store holds every patch of a PS
 
     std::shared_ptr<RfxpPs> patched;
     if (auto it = g_rfxp_ps.find(ps_key); it != g_rfxp_ps.end())
@@ -538,14 +679,20 @@ static void RfxPatchBuild(RfxpJob& job)
             const ULONGLONG t0 = GetTickCount64();
             RfxDxilResult   r;
             const bool      init_ok = RfxDxilInit((g_cso_dir + L"\\dxc").c_str(), why);
-            ok = init_ok && RfxDxilPatch(src_ps.code, src_ps.code_size, RfxDxilSpec{ kRfxGlowReg, kRfxCutoutReg, kRfxParamsReg, decensor, inject }, r);
+            RfxDxilSpec     spec{ kRfxGlowReg, kRfxCutoutReg, kRfxParamsReg, decensor, inject };
+            spec.cuts = job.cuts;
+            ok = init_ok && RfxDxilPatch(src_ps.code, src_ps.code_size, spec, r);
             if (ok) {
                 patched->code = std::move(r.code);
                 patched->max_reg = r.srv_max_reg;
                 patched->has_glow = r.has_glow;
             } else if (!r.why.empty())
                 why = r.why;
-            if (!inject) {
+            if (cut)
+                logger::write("UIDCUT ps=%016llx (%zu bytes) for %ux%u: %s in %llu ms -- %s", (unsigned long long)ps_hash, (size_t)src_ps.code_size,
+                    job.target >> 16, job.target & 0xFFFFu, ok ? "PATCHED" : "NOT patched", (unsigned long long)(GetTickCount64() - t0),
+                    ok ? r.why.c_str() : why.c_str());
+            else if (!inject) {
                 if (ok)
                     logger::write("RFXDECENSOR ps=%016llx (%zu bytes): PATCHED in %llu ms -- %s", (unsigned long long)ps_hash, (size_t)src_ps.code_size,
                         (unsigned long long)(GetTickCount64() - t0), r.why.c_str());
@@ -575,7 +722,12 @@ static void RfxPatchBuild(RfxpJob& job)
     if (patched->code.empty()) return settle(nullptr);
     max_reg = patched->max_reg;
     glow = patched->has_glow;
-    if (!inject) dps = PooledCode(patched->code.data(), patched->code.size());
+    if (!cut) {
+        if (!inject)
+            dps = PooledCode(patched->code.data(), patched->code.size());
+        else
+            pps = PooledCode(patched->code.data(), patched->code.size());
+    }
 
     shader_desc ps = src_ps;
     ps.code = patched->code.data();
@@ -585,7 +737,7 @@ static void RfxPatchBuild(RfxpJob& job)
     reshade::api::pipeline out = { 0 };
     const bool             ok = dev->create_pipeline(job.clone.layout, (uint32_t)subs.size(), subs.data(), &out);
     ID3D12PipelineState*   variant = ok ? reinterpret_cast<ID3D12PipelineState*>(out.handle) : nullptr;
-    logger::write("%s variant src=%llx ps=%016llx decensor=%d -> %s", inject ? "RFXPATCH" : "RFXDECENSOR", src_pso0, (unsigned long long)ps_hash, (int)decensor, variant ? "OK" : "FAILED(create)");
+    logger::write("%s variant src=%llx ps=%016llx decensor=%d -> %s", label, src_pso0, (unsigned long long)ps_hash, (int)decensor, variant ? "OK" : "FAILED(create)");
     if (!variant && patched->cached) {
         DeleteFileW(RfxCachePath(ps_key).c_str());
         logger::write("RFXCACHE ps=%016llx: its cached patch built no pipeline -- the cache file is removed, patched afresh next launch", (unsigned long long)ps_hash);
@@ -702,6 +854,29 @@ void RfxDecensorQueue(reshade::api::device* dev, uint64_t src_pso0)
     RfxpWake();
 }
 
+void RfxUidQueue(reshade::api::device* dev, uint64_t src_pso0, uint32_t target, std::vector<RfxDxilCut> cuts)
+{
+    if (!dev || !src_pso0 || cuts.empty()) return;
+    RfxpJob job{ dev, src_pso0, src_pso0 | (3ull << 60), false, {}, false, std::move(cuts), target };
+    {
+        std::lock_guard l(g_pso_clone_mtx);
+        auto            it = g_pso_clone.find(src_pso0);
+        if (it == g_pso_clone.end()) {
+            logger::trace("UIDCUT src=%llx -> none: no clone of this PSO", src_pso0);
+            return;
+        }
+        job.clone.layout = it->second.layout;
+        DeepCopySubobjects((uint32_t)it->second.subs.size(), it->second.subs.data(), job.clone);
+    }
+    {
+        std::lock_guard l(g_rfxp_variant_mtx);
+        if (g_rfxp_stop.load(std::memory_order_acquire)) return;
+        if (!g_uid_pending.insert({ src_pso0, target }).second) return;
+        g_rfxp_queue.push_back(std::move(job));
+    }
+    RfxpWake();
+}
+
 RfxPatchStats GetRfxPatchStats()
 {
     std::lock_guard l(g_rfxp_variant_mtx);
@@ -804,10 +979,7 @@ void PsoCloneStore(uint64_t pso_handle, pipeline_layout layout, uint32_t subobje
     PsoClone c;
     c.layout = layout;
     if (!DeepCopySubobjects(subobject_count, subobjects, c) || c.blend_idx < 0) return;
-    {
-        std::lock_guard d(g_decensor_ps_mtx);
-        g_decensor_ps.erase(pso_handle);
-    }
+    ForgetPatchedPs(pso_handle);
     std::lock_guard l(g_pso_clone_mtx);
     // A handle already here is a recycled one whose destroy we did not see: the new PSO replaces it.
     if (auto old = g_pso_clone.find(pso_handle); old != g_pso_clone.end()) {
@@ -841,12 +1013,19 @@ void PsoCloneForget(reshade::api::device* dev, uint64_t pso_handle)
         }
     }
     {
+        std::lock_guard l(g_layout_variant_mtx);
+        for (auto it = g_layout_variant.begin(); it != g_layout_variant.end();) {
+            if (it->second.src == pso_handle) {
+                if (it->second.pso) dead.push_back(it->second.pso);
+                it = g_layout_variant.erase(it);
+            } else
+                ++it;
+        }
+    }
+    {
         std::lock_guard l(g_rfxp_variant_mtx);
         g_rfxp_miss_logged.erase(pso_handle);
-        {
-            std::lock_guard d(g_decensor_ps_mtx);
-            g_decensor_ps.erase(pso_handle);
-        }
+        ForgetPatchedPs(pso_handle);
         constexpr uint64_t kSrcMask = ~(7ull << 60);
         for (unsigned d = 0; d < 8; ++d) {
             const uint64_t key = pso_handle | ((uint64_t)d << 60);
@@ -861,6 +1040,10 @@ void PsoCloneForget(reshade::api::device* dev, uint64_t pso_handle)
                 it = g_rfxp_queue.erase(it);
             else
                 ++it;
+        for (auto it = g_uid_pending.lower_bound({ pso_handle, 0 }); it != g_uid_pending.end() && it->first == pso_handle;) it = g_uid_pending.erase(it);
+        const auto made = g_uid_variants.equal_range(pso_handle);
+        for (auto it = made.first; it != made.second; ++it) dead.push_back(it->second);
+        g_uid_variants.erase(made.first, made.second);
     }
     for (ID3D12PipelineState* v : dead) {
         if (dev)

@@ -8,6 +8,8 @@ namespace logger {
 
 // Open log at an explicit path.
 void init(const wchar_t* log_path);
+// Copy the log as written so far to dst; 0, or the Win32 error.
+DWORD copy_to(const wchar_t* dst);
 
 extern int         g_level;    // 0 = off, and 0 is the default
 extern const char* g_build_id; // set once at init; emitted whenever the log first opens up

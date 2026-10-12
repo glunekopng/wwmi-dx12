@@ -19,8 +19,8 @@
 #include "dx12_dump_readback.h"           // the synchronous staging readback their dump engine assumes
 #include "dump_watchdog.h"                // DumpStage: the Map(READ) / CopyResource leaves report their position
 #include "dx12_input_layout.h"            // CurrentInputLayout, for IAGetInputLayout
-#include "prof_core.h"                    // ProfGpuWork -- the dump's RECORDED ON D3D12 rows
-#include "../instrumentation/gpu_timer.h" // GT_ShimCopy -- the dump's GPU ms rows
+#include "prof_core.h"                    // ProfGpuWork -- the performance report's work rows
+#include "../instrumentation/gpu_timer.h" // GT_ShimCopy -- the performance monitor's graphics card rows
 #include "../instrumentation/diag.h"      // DiagOnce -- COPY-WHAT, one line per destination
 #include "../../src/log.h"
 #include "../../src/d3d12_barrier.h"
@@ -575,6 +575,7 @@ static bool DispatchToAddon(bool indexed, UINT count, UINT start, INT base, UINT
     void*     user = nullptr;
     ModDrawFn fn = ModDrawCallback(&user);
     if (!fn) return false;
+    PayGameState();
     fn(count, start, base, instances, start_instance, indexed, user);
     return true;
 }
@@ -698,18 +699,20 @@ void STDMETHODCALLTYPE Dx12Context::Unmap(ID3D11Resource* pResource, UINT)
     WrapResource* wr = AsWrapResource(pResource);
     if (wr && wr->dx12 && !wr->shadow.empty()) {
         if (wr->uploaded.size() == wr->shadow.size() &&
-            memcmp(wr->uploaded.data(), wr->shadow.data(), wr->shadow.size()) == 0)
+            memcmp(wr->uploaded.data(), wr->shadow.data(), wr->shadow.size()) == 0 &&
+            ListHoldsUpload(GetDx12Bridge().cl, wr))
             return;
         wr->uploaded = wr->shadow;
+        wr->uploaded_seq = NextUploadSeq();
 
         const D3D12_RESOURCE_DESC rd = wr->dx12->GetDesc();
         if (rd.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) {
-            QueueUpload(pResource, wr->shadow.data(), wr->shadow.size());
+            QueueUpload(pResource, wr->shadow.data(), wr->shadow.size(), wr->uploaded_seq);
         } else {
             D3D11_SUBRESOURCE_DATA sd{};
             sd.pSysMem = wr->shadow.data();
             sd.SysMemPitch = (UINT)(wr->shadow.size() / (rd.Height ? rd.Height : 1)); // Map laid rows out at Width*bpp
-            QueueTextureUpload(pResource, &sd, 1);
+            QueueTextureUpload(pResource, &sd, 1, wr->uploaded_seq);
         }
         return;
     }
@@ -1114,8 +1117,7 @@ void STDMETHODCALLTYPE Dx12Context::ClearUnorderedAccessViewFloat(ID3D11Unordere
         GetDx12Bridge().cl->ClearUnorderedAccessViewFloat(gpu, cpu, v->wres->dx12,
             Values ? Values : zero, 0, nullptr);
     }
-    const Dx12Bridge& b = GetDx12Bridge();
-    if (b.restore_game_state) b.restore_game_state(b.restore_user); // ShaderVisibleCopy set our heaps
+    OweGameState(GetDx12Bridge()); // ShaderVisibleCopy set our heaps
 }
 
 void STDMETHODCALLTYPE Dx12Context::ClearUnorderedAccessViewUint(ID3D11UnorderedAccessView* pUAV,
@@ -1133,8 +1135,7 @@ void STDMETHODCALLTYPE Dx12Context::ClearUnorderedAccessViewUint(ID3D11Unordered
     GetDx12Bridge().cl->ClearUnorderedAccessViewUint(gpu, cpu, v->wres->dx12,
         Values ? Values : zero, 0, nullptr);
     if (scratch != UINT_MAX) ReleaseStagingDescriptor('u', scratch);
-    const Dx12Bridge& b = GetDx12Bridge();
-    if (b.restore_game_state) b.restore_game_state(b.restore_user);
+    OweGameState(GetDx12Bridge());
 }
 
 // ---- state QUERIES ----------------------------------------------------------------------------

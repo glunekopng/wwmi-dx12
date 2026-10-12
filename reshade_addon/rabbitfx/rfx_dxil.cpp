@@ -3,6 +3,7 @@
 #include <dxcapi.h>
 #include <mutex>
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include "rfx_dxil.h"
@@ -342,6 +343,126 @@ std::string Decensor(Module& m, int in_list_node, RfxDxilResult& out)
     return "opacity mask: " + (out.unmasked ? std::to_string(out.unmasked) + " FMin - 1/3 threshold(s) -> +1" : std::string("none")) + ", dither gate: " + (out.degated ? std::to_string(out.degated) + " subtraction(s) -> -1" : std::string("none")) + ", vertex mask: " + (out.decensored ? std::to_string(out.decensored) + " COLOR0.w - 1/3 -> -0.15" : std::string("none"));
 }
 
+// A float as LLVM IR spells it exactly: the hex of its double.
+std::string FloatLit(float f)
+{
+    const double d = f;
+    uint64_t     u = 0;
+    memcpy(&u, &d, sizeof u);
+    char s[24];
+    snprintf(s, sizeof s, "0x%016llX", (unsigned long long)u);
+    return s;
+}
+
+// The input signature's element `name` index 0, a float of at least `cols_min` columns whose used mask covers
+// `need`; -1 when there is none.
+long long InputElement(Module& m, int in_list_node, const char* name, long long cols_min, long long need, std::string& why)
+{
+    for (const auto& el_ref : Operands(m.Node(in_list_node))) {
+        const auto f = Operands(m.Node(NodeRef(el_ref)));
+        if (f.size() < 11 || f[1] != std::string("!\"") + name + "\"") continue;
+        const auto idx = Operands(m.Node(NodeRef(f[4])));
+        long long  sig;
+        long long  comp;
+        long long  cols;
+        long long  first;
+        if (idx.empty() || !IntOf(idx[0], first) || first != 0) continue;
+        if (!IntOf(f[0], sig) || !IntOf(f[2], comp) || !IntOf(f[7], cols)) continue;
+        if (comp != 9 || cols < cols_min) {
+            why = std::string(name) + " is not a float" + std::to_string(cols_min) + "+";
+            return -1;
+        }
+        long long  used = 0;
+        const auto tags = Operands(m.Node(NodeRef(f[10])));
+        for (size_t i = 0; i + 1 < tags.size(); i += 2) {
+            long long tag;
+            long long mask;
+            if (IntOf(tags[i], tag) && tag == 3 && IntOf(tags[i + 1], mask)) used = mask;
+        }
+        if ((used & need) != need) {
+            why = std::string(name) + " is read in columns " + std::to_string(used) + ", the cut needs " + std::to_string(need);
+            return -1;
+        }
+        return sig;
+    }
+    why = std::string("the input signature has no ") + name + "0";
+    return -1;
+}
+
+// The cuts: discard where SV_Position.xy lies inside a box and COLOR0.rgb inside that box's colour range.
+bool Cut(Module& m, const std::string& fn, int sig_node, const std::vector<RfxDxilCut>& cuts, RfxDxilResult& out)
+{
+    std::string& why = out.why;
+    const auto   sops = Operands(m.Node(sig_node));
+    const int    in_list_node = sops.empty() ? -1 : NodeRef(sops[0]);
+    if (in_list_node < 0) {
+        why = "no input signature";
+        return false;
+    }
+    const long long pos = InputElement(m, in_list_node, "SV_Position", 2, 3, why);
+    if (pos < 0) return false;
+    const long long col = InputElement(m, in_list_node, "COLOR", 3, 7, why);
+    if (col < 0) return false;
+
+    auto load = [&](const char* name, long long sig, int c) {
+        return std::string("  %uidc_") + name + " = call float @dx.op.loadInput.f32(i32 4, i32 " + std::to_string(sig) + ", i32 0, i8 " +
+            std::to_string(c) + ", i32 undef)\n";
+    };
+    std::string b = load("x", pos, 0) + load("y", pos, 1) + load("r", col, 0) + load("g", col, 1) + load("b", col, 2);
+    std::string any;
+    for (size_t k = 0; k < cuts.size(); ++k) {
+        const RfxDxilCut& c = cuts[k];
+        const std::string p = "%uidc" + std::to_string(k) + "_";
+        std::string       all;
+        auto              test = [&](const char* name, const char* op, const char* v, float lit) {
+            b += "  " + p + name + " = fcmp fast " + op + " float %uidc_" + v + ", " + FloatLit(lit) + "\n";
+            if (all.empty())
+                all = p + name;
+            else {
+                b += "  " + p + name + "_and = and i1 " + all + ", " + p + name + "\n";
+                all = p + name + "_and";
+            }
+        };
+        test("x0", "oge", "x", c.x0);
+        test("x1", "olt", "x", c.x1);
+        test("y0", "oge", "y", c.y0);
+        test("y1", "olt", "y", c.y1);
+        test("r0", "oge", "r", c.lo[0]);
+        test("r1", "ole", "r", c.hi[0]);
+        test("g0", "oge", "g", c.lo[1]);
+        test("g1", "ole", "g", c.hi[1]);
+        test("b0", "oge", "b", c.lo[2]);
+        test("b1", "ole", "b", c.hi[2]);
+        if (any.empty())
+            any = all;
+        else {
+            b += "  " + p + "or = or i1 " + any + ", " + all + "\n";
+            any = p + "or";
+        }
+    }
+    b += "  call void @dx.op.discard(i32 82, i1 " + any + ")\n";
+
+    std::string pre;
+    auto        need_decl = [&](const char* name, const char* decl) {
+        if (m.t.find(std::string("@dx.op.") + name + "(i32,") == std::string::npos) pre += std::string(decl) + "\n"; };
+    need_decl("loadInput.f32", "declare float @dx.op.loadInput.f32(i32, i32, i32, i8, i32) nounwind readnone");
+    need_decl("discard", "declare void @dx.op.discard(i32, i1) nounwind");
+    const size_t def = m.t.find("\ndefine void " + fn + "(");
+    if (def == std::string::npos) {
+        why = "no `define void " + fn + "(`";
+        return false;
+    }
+    const size_t brace = m.t.find("{\n", def + 1);
+    if (brace == std::string::npos) {
+        why = "the function has no body";
+        return false;
+    }
+    m.t.insert(brace + 2, b);
+    m.t.insert(def + 1, pre);
+    why = "cut: SV_Position = input " + std::to_string(pos) + ", COLOR0 = input " + std::to_string(col) + ", " + std::to_string(cuts.size()) + " box(es)";
+    return true;
+}
+
 bool PatchText(Module& m, const RfxDxilSpec& spec, RfxDxilResult& out)
 {
     std::string& why = out.why;
@@ -373,6 +494,7 @@ bool PatchText(Module& m, const RfxDxilSpec& spec, RfxDxilResult& out)
         why = "entry point has no signatures";
         return false;
     }
+    if (!spec.cuts.empty()) return Cut(m, fn, sig_node, spec.cuts, out);
     if (!spec.inject) {
         const auto s0 = Operands(m.Node(sig_node));
         const int  il = s0.empty() ? -1 : NodeRef(s0[0]);

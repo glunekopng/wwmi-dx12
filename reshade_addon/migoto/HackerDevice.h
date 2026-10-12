@@ -95,13 +95,9 @@ public:
 class HackerDevice {
 public:
     HRESULT STDMETHODCALLTYPE CreateCustomInputLayout(
-        const D3D11_INPUT_ELEMENT_DESC* /*pInputElementDescs*/, UINT /*NumElements*/,
-        const void* /*pShaderBytecodeWithInputSignature*/, SIZE_T /*BytecodeLength*/,
-        ID3D11InputLayout** ppInputLayout)
-    {
-        if (ppInputLayout) *ppInputLayout = nullptr;
-        return S_FALSE;
-    }
+        const D3D11_INPUT_ELEMENT_DESC* pInputElementDescs, UINT NumElements,
+        const void* pShaderBytecodeWithInputSignature, SIZE_T BytecodeLength,
+        ID3D11InputLayout** ppInputLayout);
 
     ID3D11Texture1D*          mIniTexture = nullptr;
     ID3D11ShaderResourceView* mIniResourceView = nullptr;

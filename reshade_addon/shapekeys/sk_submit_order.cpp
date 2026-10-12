@@ -3,6 +3,7 @@
 #include "../instrumentation/morph_dump.h"
 #include "../instrumentation/removal_pin.h"
 #include "../instrumentation/profiler.h"
+#include "../instrumentation/hot_path.h"
 
 struct SubmitLog {
     uint32_t                 frame = 0;

@@ -18,6 +18,7 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <vector>
 
 namespace PortApi {
 
@@ -48,27 +49,58 @@ unsigned Crc32c(unsigned seed, const void* data, size_t n)
 namespace {
 template <class Key, class Wrap>
 struct SlotWrappers {
-    std::mutex           mtx;
-    std::map<Key, Wrap*> slots;
-    Wrap*                Get(const Key& k)
+    struct Slot {
+        Wrap*              current = nullptr;
+        std::vector<Wrap*> retired;
+    };
+    std::mutex          mtx;
+    std::map<Key, Slot> slots;
+    Wrap*               Get(const Key& k)
     {
         std::lock_guard<std::mutex> l(mtx);
-        auto                        it = slots.find(k);
-        if (it == slots.end()) it = slots.emplace(k, new Wrap()).first;
-        return it->second;
+        Slot&                       s = slots[k];
+        if (!s.current) s.current = new Wrap();
+        return s.current;
     }
     Wrap* Find(const Key& k)
     {
         std::lock_guard<std::mutex> l(mtx);
         auto                        it = slots.find(k);
-        return it == slots.end() ? nullptr : it->second;
+        return it == slots.end() ? nullptr : it->second.current;
+    }
+    Wrap* Unheld(const Key& k, const void* bound, size_t* moved_to)
+    {
+        std::lock_guard<std::mutex> l(mtx);
+        Slot&                       s = slots[k];
+        auto                        unheld = [&](Wrap* w) { return w->RefCount() <= (bound == (const void*)w ? 2 : 1); };
+        *moved_to = 0;
+        if (!s.current) s.current = new Wrap();
+        if (unheld(s.current)) return s.current;
+        s.retired.push_back(s.current);
+        s.current = nullptr;
+        for (size_t i = 0; i < s.retired.size() && !s.current; ++i)
+            if (unheld(s.retired[i])) {
+                s.current = s.retired[i];
+                s.retired.erase(s.retired.begin() + (ptrdiff_t)i);
+            }
+        if (!s.current) s.current = new Wrap();
+        *moved_to = s.retired.size() + 1;
+        return s.current;
     }
 };
 using StageSlot = std::pair<int, unsigned>;
 
+void ForgetOverrideCandidates(ResourceHandleInfo& info)
+{
+    info.texture_override_candidates_valid = false;
+    info.texture_override_candidates.hash_matches = nullptr;
+    info.texture_override_candidates.fuzzy_matches.clear();
+}
+
 void RegisterGameBuffer(MigotoPort::WrapBuffer* w, unsigned hash)
 {
     ResourceHandleInfo& info = G->mResources[(ID3D11Resource*)w];
+    if (info.type != D3D11_RESOURCE_DIMENSION_BUFFER || info.hash != hash) ForgetOverrideCandidates(info);
     info.type = D3D11_RESOURCE_DIMENSION_BUFFER;
     info.hash = hash;
     info.orig_hash = hash;
@@ -76,6 +108,8 @@ void RegisterGameBuffer(MigotoPort::WrapBuffer* w, unsigned hash)
 void RegisterGameTexture2D(MigotoPort::WrapTexture2D* w, unsigned content_hash)
 {
     ResourceHandleInfo& info = G->mResources[(ID3D11Resource*)w];
+    if (info.type != D3D11_RESOURCE_DIMENSION_TEXTURE2D || memcmp(&info.desc2D, &w->desc, sizeof w->desc) != 0)
+        ForgetOverrideCandidates(info);
     info.type = D3D11_RESOURCE_DIMENSION_TEXTURE2D;
     info.data_hash = content_hash;
     info.hash = content_hash ? content_hash : CalcTexture2DDescHash(0, &w->desc);
@@ -235,7 +269,21 @@ void PushGameConstantBuffer(char stage, unsigned slot, ID3D12Resource* res,
     }
 
     static auto*            slots = new SlotWrappers<StageSlot, MigotoPort::WrapBuffer>();
-    MigotoPort::WrapBuffer* w = slots->Get({ si, slot });
+    size_t                  moved_to = 0;
+    MigotoPort::WrapBuffer* w = slots->Unheld({ si, slot }, MigotoPort::State().cb[si][slot], &moved_to);
+    if (moved_to && logger::enabled(1)) {
+        static std::mutex       m;
+        static std::set<size_t> seen;
+        bool                    first;
+        {
+            std::lock_guard<std::mutex> l(m);
+            first = seen.insert(((size_t)si << 40) | ((size_t)slot << 32) | moved_to).second;
+        }
+        if (first)
+            logger::write("PORT-CB-HELD %c%c-cb%u: a reference (a pool or resource slot) holds the buffer bound before -- "
+                          "it keeps that buffer, and the slot publishes through another wrapper (%zu for this slot)",
+                "vhdgpc"[si], 's', slot, moved_to);
+    }
     if (w->dx12 != res) w->heap_type = (D3D12_HEAP_TYPE)0; // foreign, as the VB wrapper above
     w->foreign = true;
     BindSlot(w->dx12, res);                        // re-point it at what the game has bound NOW
@@ -386,6 +434,7 @@ int PushGameComputeUav(unsigned slot, ID3D12Resource* res, unsigned byte_width, 
     if (!g_loaded) return kPushUavNotLoaded;
     if (slot >= (unsigned)MigotoPort::kMaxUAV) return kPushUavBadSlot;
 
+    int result = kPushUavPublished;
     {
         ID3D11UnorderedAccessView* cur = nullptr;
         if (ID3D11DeviceContext1* octx = g_ctx.GetPassThroughOrigContext1())
@@ -393,7 +442,7 @@ int PushGameComputeUav(unsigned slot, ID3D12Resource* res, unsigned byte_width, 
         if (cur) {
             const bool ours = (ID3D11UnorderedAccessView*)g_gameuav_view.Find(slot) == cur;
             cur->Release();
-            if (!ours) return kPushUavModOwnsSlot;
+            if (!ours) result = kPushUavOverMod;
         }
     }
 
@@ -434,7 +483,7 @@ int PushGameComputeUav(unsigned slot, ID3D12Resource* res, unsigned byte_width, 
     if (!octx) return kPushUavNoContext; // the setter would be a no-op; say so rather than "published"
     ID3D11UnorderedAccessView* views[1] = { res ? (ID3D11UnorderedAccessView*)v : nullptr };
     octx->CSSetUnorderedAccessViews(slot, 1, views, nullptr);
-    return res ? kPushUavPublished : kPushUavCleared;
+    return res ? result : kPushUavCleared;
 }
 
 // ---- the game's TEXTURES, same transition as PushGameConstantBuffer -------------------------------
@@ -468,7 +517,7 @@ ID3D11ShaderResourceView* PublishedTextureView(int si, unsigned slot)
 
 } // namespace
 
-int PushGameTexture(char stage, unsigned slot, ID3D12Resource* res, unsigned content_hash)
+int PushGameTexture(char stage, unsigned slot, ID3D12Resource* res, unsigned content_hash, unsigned view_format)
 {
     std::lock_guard<std::recursive_mutex> engine_lk(EngineLock());
     if (!g_loaded) return kPushTexNotLoaded;
@@ -509,7 +558,7 @@ int PushGameTexture(char stage, unsigned slot, ID3D12Resource* res, unsigned con
     MigotoPort::WrapSRV* v = g_gametex_view.Get({ si, slot });
     v->res = res ? (ID3D11Resource*)w : nullptr;
     v->wres = res ? (MigotoPort::WrapResource*)w : nullptr; // our side of the same object
-    v->desc.Format = EnsureNotTypeless(w->desc.Format);
+    v->desc.Format = view_format ? (DXGI_FORMAT)view_format : EnsureNotTypeless(w->desc.Format);
     v->desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
     v->desc.Texture2D.MipLevels = w->desc.MipLevels;
 

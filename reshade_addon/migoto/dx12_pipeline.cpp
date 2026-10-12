@@ -16,7 +16,7 @@
 #include "../../src/log.h"
 #include "../../src/fnv.h"
 #include "../instrumentation/removal_pin.h" // the per-list tally of what this file records (REMOVAL-PIN)
-#include "../instrumentation/gpu_timer.h"   // GPU ms of what this file records (profiler dump)
+#include "../instrumentation/gpu_timer.h"   // GPU ms of what this file records (performance monitor)
 #include "../../src/d3d12_buffer.h"
 #include "../../src/d3d12_barrier.h"
 #include "prof_core.h" // PROF(PL_*), ProfGpuWork: IssueDraw/IssueDispatch and the upload path
@@ -383,6 +383,90 @@ std::mutex                                                    g_list_buf_mtx;
 std::unordered_set<ID3D12Resource*>                           g_owned_bufs;
 std::unordered_map<ID3D12GraphicsCommandList*, ListBufStates> g_list_buf;
 std::unordered_map<ID3D12Resource*, uint64_t>                 g_owned_writes;
+std::unordered_map<ID3D12GraphicsCommandList*, uint64_t>      g_list_recording;
+uint64_t                                                      g_list_recordings = 0;
+std::atomic<uint64_t>                                         g_upload_seq{ 0 };
+
+uint64_t ListRecording(ID3D12GraphicsCommandList* cl)
+{
+    if (!cl) return 0;
+    std::lock_guard<std::mutex> l(g_list_buf_mtx);
+    auto                        it = g_list_recording.find(cl);
+    return it == g_list_recording.end() ? 0 : it->second;
+}
+
+void UavBarrier(ID3D12GraphicsCommandList* cl, ID3D12Resource* res)
+{
+    D3D12_RESOURCE_BARRIER ub{};
+    ub.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    ub.UAV.pResource = res;
+    cl->ResourceBarrier(1, &ub);
+    ProfGpuWork(PGW_UavBarrier, 0);
+    RemovalPin::Ours(cl, "port-uav-barrier");
+}
+
+class OwedUavBarriers {
+public:
+    void Note(ID3D12GraphicsCommandList* cl, ID3D12Resource* res)
+    {
+        std::lock_guard<std::mutex>   l(mtx_);
+        std::vector<ID3D12Resource*>& owed = lists_[cl];
+        if (std::find(owed.begin(), owed.end(), res) == owed.end()) owed.push_back(res);
+    }
+
+    bool Take(ID3D12GraphicsCommandList* cl, ID3D12Resource* res)
+    {
+        std::lock_guard<std::mutex> l(mtx_);
+        auto                        it = lists_.find(cl);
+        if (it == lists_.end()) return false;
+        std::vector<ID3D12Resource*>& owed = it->second;
+        auto                          r = std::find(owed.begin(), owed.end(), res);
+        if (r == owed.end()) return false;
+        *r = owed.back();
+        owed.pop_back();
+        if (owed.empty()) lists_.erase(it);
+        return true;
+    }
+
+    void Pay(ID3D12GraphicsCommandList* cl, ID3D12Resource* res, bool transitioned)
+    {
+        if (transitioned)
+            ProfGpuWork(PGW_UavCovered, 0);
+        else
+            UavBarrier(cl, res);
+    }
+
+    void Flush(ID3D12GraphicsCommandList* cl)
+    {
+        std::vector<ID3D12Resource*> owed;
+        {
+            std::lock_guard<std::mutex> l(mtx_);
+            auto                        it = lists_.find(cl);
+            if (it == lists_.end()) return;
+            owed.swap(it->second);
+            lists_.erase(it);
+        }
+        std::vector<D3D12_RESOURCE_BARRIER> ub(owed.size());
+        for (size_t i = 0; i < owed.size(); ++i) {
+            ub[i].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+            ub[i].UAV.pResource = owed[i];
+            ProfGpuWork(PGW_UavBarrier, 0);
+        }
+        cl->ResourceBarrier((UINT)ub.size(), ub.data());
+        RemovalPin::Ours(cl, "port-uav-barrier");
+    }
+
+    void Forget(ID3D12GraphicsCommandList* cl)
+    {
+        std::lock_guard<std::mutex> l(mtx_);
+        lists_.erase(cl);
+    }
+
+private:
+    std::mutex                                                                     mtx_;
+    std::unordered_map<ID3D12GraphicsCommandList*, std::vector<ID3D12Resource*>> lists_;
+};
+OwedUavBarriers g_owed_uav;
 
 bool HostHeap(WrapResource* r)
 {
@@ -395,18 +479,77 @@ bool HostHeap(WrapResource* r)
     return r->heap_type == D3D12_HEAP_TYPE_UPLOAD || r->heap_type == D3D12_HEAP_TYPE_READBACK;
 }
 
-D3D12_RESOURCE_STATES SwapListBufState(ID3D12GraphicsCommandList* cl, ID3D12Resource* res, D3D12_RESOURCE_STATES to)
+bool BufferRead(D3D12_RESOURCE_STATES s)
+{
+    return s != D3D12_RESOURCE_STATE_COMMON && (s & ~D3D12_RESOURCE_STATE_GENERIC_READ) == 0;
+}
+
+struct ListBufChange {
+    D3D12_RESOURCE_STATES was = D3D12_RESOURCE_STATE_COMMON;
+    D3D12_RESOURCE_STATES now = D3D12_RESOURCE_STATE_COMMON;
+
+    static D3D12_RESOURCE_STATES Next(D3D12_RESOURCE_STATES was, D3D12_RESOURCE_STATES to)
+    {
+        if (!BufferRead(to) || was == D3D12_RESOURCE_STATE_COMMON) return to;
+        if (BufferRead(was) && (was & to) == to) return was;
+        return D3D12_RESOURCE_STATE_GENERIC_READ;
+    }
+
+    bool Record(ID3D12GraphicsCommandList* cl, ID3D12Resource* res, D3D12_RESOURCE_STATES to) const
+    {
+        if (now == was) {
+            if (now != to) ProfGpuWork(PGW_ReadKept, 0);
+            return false;
+        }
+        if (was == D3D12_RESOURCE_STATE_COMMON) {
+            ProfGpuWork(PGW_Promoted, 0);
+            return false;
+        }
+        TransitionBarrier(cl, res, was, now);
+        ProfGpuWork(PGW_Barrier, 0);
+        RemovalPin::Ours(cl, "port-transition");
+        return true;
+    }
+};
+
+ListBufChange SwapListBufState(ID3D12GraphicsCommandList* cl, ID3D12Resource* res, D3D12_RESOURCE_STATES to)
 {
     std::lock_guard<std::mutex> l(g_list_buf_mtx);
     ListBufStates&              ls = g_list_buf[cl];
+    ListBufChange               c;
     for (auto& e : ls)
         if (e.first == res) {
-            const D3D12_RESOURCE_STATES was = e.second;
-            e.second = to;
-            return was;
+            c.was = e.second;
+            c.now = ListBufChange::Next(c.was, to);
+            e.second = c.now;
+            return c;
         }
+    c.now = to;
     ls.emplace_back(res, to);
-    return D3D12_RESOURCE_STATE_COMMON;
+    return c;
+}
+
+bool StateBarrier(ID3D12GraphicsCommandList* cl, WrapResource* r, D3D12_RESOURCE_STATES to)
+{
+    if (r->foreign) {
+        const uint32_t obs = ObservedResourceState(r->dx12);
+        if (obs != kResStateUnknown) r->state = (D3D12_RESOURCE_STATES)obs;
+    }
+
+    if (r->state == to) return false;
+    if (!r->foreign && Promotable(r, to)) {
+        r->state = to;
+        ProfGpuWork(PGW_Promoted, 0);
+        return false;
+    }
+
+    if (HostHeap(r)) return false;
+
+    TransitionBarrier(cl, r->dx12, r->state, to);
+    ProfGpuWork(PGW_Barrier, 0);
+    RemovalPin::Ours(cl, "port-transition");
+    r->state = to;
+    return true;
 }
 
 void Transition(ID3D12GraphicsCommandList* cl, WrapResource* r, D3D12_RESOURCE_STATES to)
@@ -419,24 +562,9 @@ void Transition(ID3D12GraphicsCommandList* cl, WrapResource* r, D3D12_RESOURCE_S
         return;
     }
 
-    if (r->foreign) {
-        const uint32_t obs = ObservedResourceState(r->dx12);
-        if (obs != kResStateUnknown) r->state = (D3D12_RESOURCE_STATES)obs;
-    }
-
-    if (r->state == to) return;
-    if (!r->foreign && Promotable(r, to)) {
-        r->state = to;
-        ProfGpuWork(PGW_Promoted, 0);
-        return;
-    }
-
-    if (HostHeap(r)) return;
-
-    TransitionBarrier(cl, r->dx12, r->state, to);
-    ProfGpuWork(PGW_Barrier, 0);
-    RemovalPin::Ours(cl, "port-transition");
-    r->state = to;
+    const bool owed = g_owed_uav.Take(cl, r->dx12);
+    const bool transitioned = StateBarrier(cl, r, to);
+    if (owed) g_owed_uav.Pay(cl, r->dx12, transitioned);
 }
 
 void WriteNullDescriptor(char kind, D3D12_CPU_DESCRIPTOR_HANDLE dst,
@@ -539,6 +667,7 @@ struct PendingUpload {
     UINT64                                          src_offset = 0; // buffer uploads: where in `staging` the bytes start
     UINT64                                          bytes = 0;
     uint64_t                                        queued_stamp = 0;
+    uint64_t                                        seq = 0;
 };
 std::vector<PendingUpload>& Uploads()
 {
@@ -662,8 +791,10 @@ struct CbSnapshotUse {
     D3D12_GPU_VIRTUAL_ADDRESS va;
 };
 constexpr UINT64                                                           kCbSnapshotBytes = 64 * 1024;
+constexpr UINT64                                                           kCbSnapshotsPerHeap = 64;
 std::mutex                                                                 g_cb_snap_mtx;
 std::vector<CbSnapshot>                                                    g_cb_snaps;
+std::vector<ID3D12Heap*>                                                   g_cb_snap_heaps;
 std::unordered_map<ID3D12GraphicsCommandList*, std::vector<CbSnapshotUse>> g_cb_snap_uses;
 std::atomic<unsigned>                                                      g_cb_snap_logged{ 0 };
 
@@ -678,6 +809,35 @@ void ForgetCbSnapshotUses(ID3D12GraphicsCommandList* cl)
 {
     std::lock_guard<std::mutex> l(g_cb_snap_mtx);
     g_cb_snap_uses.erase(cl);
+}
+
+ID3D12Resource* TakeCbSnapshot()
+{
+    for (CbSnapshot& s : g_cb_snaps)
+        if (GpuPassed(s.stamp)) {
+            s.stamp = GpuStamp();
+            return s.res;
+        }
+    return nullptr;
+}
+
+bool GrowCbSnapshots(ID3D12Device* dev)
+{
+    D3D12_HEAP_DESC hd{};
+    hd.SizeInBytes = kCbSnapshotBytes * kCbSnapshotsPerHeap;
+    hd.Properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+    hd.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS;
+    ID3D12Heap* heap = nullptr;
+    if (FAILED(dev->CreateHeap(&hd, IID_PPV_ARGS(&heap))) || !heap) return false;
+    g_cb_snap_heaps.push_back(heap);
+    const size_t before = g_cb_snaps.size();
+    for (UINT64 i = 0; i < kCbSnapshotsPerHeap; ++i) {
+        ID3D12Resource* res = nullptr;
+        if (FAILED(CreatePlacedD3D12Buffer(dev, heap, i * kCbSnapshotBytes, kCbSnapshotBytes, D3D12_RESOURCE_STATE_COMMON, &res)) || !res)
+            break;
+        g_cb_snaps.push_back({ res, 0 });
+    }
+    return g_cb_snaps.size() > before;
 }
 } // namespace
 
@@ -710,16 +870,11 @@ D3D12_RESOURCE_STATES OwnedTransition(ID3D12GraphicsCommandList* cl, ID3D12Resou
         std::lock_guard<std::mutex> l(g_list_buf_mtx);
         ++g_owned_writes[res];
     }
-    const D3D12_RESOURCE_STATES was = SwapListBufState(cl, res, to);
-    if (was == to) return was;
-    if (was == D3D12_RESOURCE_STATE_COMMON) {
-        ProfGpuWork(PGW_Promoted, 0);
-        return was;
-    }
-    TransitionBarrier(cl, res, was, to);
-    ProfGpuWork(PGW_Barrier, 0);
-    RemovalPin::Ours(cl, "port-transition");
-    return was;
+    const bool          owed = g_owed_uav.Take(cl, res);
+    const ListBufChange c = SwapListBufState(cl, res, to);
+    const bool          transitioned = c.Record(cl, res, to);
+    if (owed) g_owed_uav.Pay(cl, res, transitioned);
+    return c.was;
 }
 
 D3D12_RESOURCE_STATES ListStateOf(ID3D12GraphicsCommandList* cl, WrapResource* r)
@@ -734,21 +889,30 @@ D3D12_RESOURCE_STATES ListStateOf(ID3D12GraphicsCommandList* cl, WrapResource* r
     return D3D12_RESOURCE_STATE_COMMON;
 }
 
+void FlushUavBarriers(ID3D12GraphicsCommandList* cl)
+{
+    if (cl) g_owed_uav.Flush(cl);
+}
+
 void ListBuffersForget(ID3D12GraphicsCommandList* cl)
 {
     if (!cl) return;
+    g_owed_uav.Forget(cl);
     ForgetCbSnapshotUses(cl);
     std::lock_guard<std::mutex> l(g_list_buf_mtx);
     g_list_buf.erase(cl);
+    g_list_recording[cl] = ++g_list_recordings;
 }
 
 void ListBuffersToCommon(ID3D12GraphicsCommandList* cl)
 {
     if (!cl) return;
+    g_owed_uav.Flush(cl);
     ForgetCbSnapshotUses(cl);
     ListBufStates st;
     {
         std::lock_guard<std::mutex> l(g_list_buf_mtx);
+        g_list_recording.erase(cl);
         auto                        it = g_list_buf.find(cl);
         if (it == g_list_buf.end()) return;
         st.swap(it->second);
@@ -776,20 +940,14 @@ D3D12_GPU_VIRTUAL_ADDRESS StaticCbSnapshot(ID3D12GraphicsCommandList* cl, ID3D12
         std::lock_guard<std::mutex> l(g_cb_snap_mtx);
         for (const CbSnapshotUse& u : g_cb_snap_uses[cl])
             if (u.src == src && u.src_off == src_off && u.bytes == bytes && u.writes == writes) return u.va;
-        for (CbSnapshot& s : g_cb_snaps)
-            if (GpuPassed(s.stamp)) {
-                s.stamp = GpuStamp();
-                snap = s.res;
-                break;
-            }
-        if (!snap) {
-            if (FAILED(CreateD3D12Buffer(dev, D3D12_HEAP_TYPE_DEFAULT, kCbSnapshotBytes, D3D12_RESOURCE_STATE_COMMON, &snap)) || !snap)
-                return 0;
-            g_cb_snaps.push_back({ snap, GpuStamp() });
+        snap = TakeCbSnapshot();
+        if (!snap && GrowCbSnapshots(dev)) {
             pool = g_cb_snaps.size();
+            snap = TakeCbSnapshot();
         }
+        if (!snap) return 0;
     }
-    if (pool && (pool & (pool - 1)) == 0 && g_cb_snap_logged.fetch_add(1, std::memory_order_relaxed) < 16)
+    if (pool && g_cb_snap_logged.fetch_add(1, std::memory_order_relaxed) < 16)
         logger::write("CBSNAP: %zu snapshot buffer(s) of %llu KB -- a static root CBV of the game reads one of ours", pool,
             (unsigned long long)(kCbSnapshotBytes / 1024));
     OwnedTransition(cl, src, D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -887,7 +1045,8 @@ bool CopyBufferCs(ID3D12GraphicsCommandList* cl, WrapResource* dst, UINT64 dst_o
     cl->SetComputeRootUnorderedAccessView(2, dst->dx12->GetGPUVirtualAddress());
     cl->Dispatch((UINT)((bytes + 1023) / 1024), 1, 1);
     RemovalPin::Ours(cl, "port-bufcopy");
-    if (b.restore_game_state) b.restore_game_state(b.restore_user);
+    if (g_uav_barrier) g_owed_uav.Note(cl, dst->dx12);
+    OweGameState(b);
     return true;
 }
 
@@ -906,7 +1065,7 @@ ID3D12Resource* MakeStaging(UINT64 bytes)
 
 } // namespace
 
-void QueueUpload(ID3D11Resource* dst, const void* data, size_t bytes)
+void QueueUpload(ID3D11Resource* dst, const void* data, size_t bytes, uint64_t seq)
 {
     WrapResource* wr = AsWrapResource(dst);
     if (!wr || !wr->dx12 || !data || !bytes) return;
@@ -940,12 +1099,14 @@ void QueueUpload(ID3D11Resource* dst, const void* data, size_t bytes)
         u.staging = staging;
     }
     u.dst = dst;
+    u.seq = seq;
     dst->AddRef();
     std::lock_guard<std::mutex> l(Mtx());
+    wr->queued_seq = seq;
     Uploads().push_back(std::move(u));
 }
 
-void QueueTextureUpload(ID3D11Resource* dst, const D3D11_SUBRESOURCE_DATA* data, UINT subresources)
+void QueueTextureUpload(ID3D11Resource* dst, const D3D11_SUBRESOURCE_DATA* data, UINT subresources, uint64_t seq)
 {
     {
         static const bool skip = [] {
@@ -978,6 +1139,8 @@ void QueueTextureUpload(ID3D11Resource* dst, const D3D11_SUBRESOURCE_DATA* data,
             for (UINT y = 0; y < rows[0]; ++y)
                 memcpy(dst_rows + (size_t)y * it->layouts[0].Footprint.RowPitch,
                     src_rows + (size_t)y * data[0].SysMemPitch, (size_t)row_bytes[0]);
+            it->seq = seq;
+            wr->queued_seq = seq;
             ProfGpuWork(PGW_UploadDedup, 0);
             return;
         }
@@ -1031,19 +1194,39 @@ void QueueTextureUpload(ID3D11Resource* dst, const D3D11_SUBRESOURCE_DATA* data,
     u.layouts = std::move(layouts);
     u.bytes = total;
     u.queued_stamp = GpuStamp();
+    u.seq = seq;
     std::lock_guard<std::mutex> l(Mtx());
+    wr->queued_seq = seq;
     Uploads().push_back(std::move(u));
+}
+
+uint64_t NextUploadSeq()
+{
+    return g_upload_seq.fetch_add(1, std::memory_order_relaxed) + 1;
+}
+
+bool ListHoldsUpload(ID3D12GraphicsCommandList* cl, const WrapResource* wr)
+{
+    if (!cl || !wr || !wr->uploaded_seq) return false;
+    const uint64_t recording = ListRecording(cl);
+    if (!recording) return false;
+    std::lock_guard<std::mutex> l(Mtx());
+    return wr->queued_seq == wr->uploaded_seq && wr->flushed.seq == wr->uploaded_seq && wr->flushed.list == cl &&
+        wr->flushed.recording == recording;
 }
 
 void FlushPendingUploads(ID3D12GraphicsCommandList* cl)
 {
     if (!cl) return;
     PROF(PL_UploadFlush);
+    const uint64_t             recording = ListRecording(cl);
     std::vector<PendingUpload> todo;
     {
         std::lock_guard<std::mutex> l(Mtx());
         if (Uploads().empty()) return;
         todo.swap(Uploads());
+        for (const PendingUpload& u : todo)
+            if (WrapResource* wr = AsWrapResource(u.dst)) wr->flushed = { u.seq, cl, recording };
         // Release only what the GPU is demonstrably done with, instead of everything queued last time.
         auto&  ret = RetiredStaging();
         size_t keep = 0;
@@ -1685,17 +1868,6 @@ ID3D12PipelineState* GetComputePso(ID3D12RootSignature* rs)
 
 } // namespace
 
-void PortHeapStats(unsigned* staging_used, unsigned* staging_cap, unsigned* staging_freed,
-    unsigned* n_rootsigs, unsigned* n_psos)
-{
-    std::lock_guard<std::mutex> l(Mtx());
-    if (staging_used) *staging_used = (unsigned)H().staging.next;
-    if (staging_cap) *staging_cap = (unsigned)(H().staging.size * (1 + H().staging.more.size()));
-    if (staging_freed) *staging_freed = (unsigned)H().staging.freed.size();
-    if (n_rootsigs) *n_rootsigs = (unsigned)H().rootsigs.size();
-    if (n_psos) *n_psos = (unsigned)H().psos.size();
-}
-
 static std::atomic<int>                g_present_draw_probe{ 0 };
 static std::atomic<unsigned long long> g_own_list_draws{ 0 };
 unsigned long long                     OwnListDrawsIssued()
@@ -1862,6 +2034,7 @@ bool IssueDraw(bool indexed, UINT count, UINT start, INT base_vertex,
             vs_dbg, count, start, instances);
     }
     BridgeNoteIssue(b.cl, false, count, start, instances); // X30: is this the list the opening thread named?
+    PayGameState();
     RemovalPin::Ours(b.cl, "port-draw");
     if (!EnsureHeaps()) return IssueBail(true, "EnsureHeaps", vs_dbg, count, start, instances);
     FlushPendingUploads(b.cl);
@@ -2017,6 +2190,7 @@ bool IssueDraw(bool indexed, UINT count, UINT start, INT base_vertex,
         TracePresentDraw(b, *rse, indexed, count, start, instances ? instances : 1, num_rt, rt_fmt[0],
             probe_rt0, probe_rt0_state, st.num_rtv, ds_fmt, probe_vp_mode, probe_vp, probe_sc);
 
+    g_owed_uav.Flush(b.cl);
     const int   gt = g_gpu_timer.Begin(b.cl, b.own_list ? GT_PresentDraw : GT_IssueDraw);
     void* const hp = HotPath::GpuBracketBegin(b.cl, b.own_list ? GT_PresentDraw : GT_IssueDraw);
     if (indexed)
@@ -2137,31 +2311,15 @@ bool IssueDispatch(UINT x, UINT y, UINT z)
     }
 
     if (g_uav_barrier) {
-        D3D12_RESOURCE_BARRIER ub[kMaxUAV] = {};
-        UINT                   n = 0;
-        PipeState&             pst = State();
+        PipeState& pst = State();
         for (const RootBind& rb : want) {
             if (rb.kind != 'u' || rb.reg >= kMaxUAV) continue;
             WrapView* wv = AsWrapView(pst.uav[rb.reg]);
-            if (!wv || !wv->wres || !wv->wres->dx12) continue;
-            bool dup = false;
-            for (UINT k = 0; k < n; ++k)
-                if (ub[k].UAV.pResource == wv->wres->dx12) {
-                    dup = true;
-                    break;
-                }
-            if (dup || n >= kMaxUAV) continue;
-            ub[n].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-            ub[n].UAV.pResource = wv->wres->dx12;
-            ++n;
-        }
-        if (n) {
-            b.cl->ResourceBarrier(n, ub);
-            RemovalPin::Ours(b.cl, "port-uav-barrier");
+            if (wv && wv->wres && wv->wres->dx12) g_owed_uav.Note(b.cl, wv->wres->dx12);
         }
     }
 
-    if (b.restore_game_state) b.restore_game_state(b.restore_user);
+    OweGameState(b);
     return true;
 }
 

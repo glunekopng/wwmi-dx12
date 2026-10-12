@@ -580,6 +580,8 @@ bool RunSectionByName(const wchar_t* fq_section, DrawInfo* draw)
     std::lock_guard<std::recursive_mutex> engine_lk(EngineLock());
     if (draw) draw->srv_gen_at_entry = MigotoPort::SrvWriteGen(); // under the lock: nothing of another section's can follow
     if (!g_loaded || !fq_section) return false;
+    g_ctx.RestoreInputLayout();
+    g_ctx.mDrawPipeline = draw ? draw->pso : 0;
     ProfScope        lookup_scope(PL_DI_PsLookup); // name -> section, ended before the list runs
     DrawCallInfo     ci = ToCallInfo(draw);
     const SectionHit hit = FindSection(fq_section);
@@ -597,6 +599,14 @@ bool RunSectionByName(const wchar_t* fq_section, DrawInfo* draw)
         return true;
     }
     return false;
+}
+
+bool RunSectionThenPost(const wchar_t* fq_section, DrawInfo* draw)
+{
+    std::lock_guard<std::recursive_mutex> engine_lk(EngineLock());
+    const bool                            ran = RunSectionByName(fq_section, draw);
+    RunPendingPost();
+    return ran;
 }
 
 namespace {

@@ -24,6 +24,7 @@ struct ShadowSlotOvr {
     D3D12_CPU_DESCRIPTOR_HANDLE src;
 };
 void SetShadowExtraSlots(const ShadowSlotOvr* s, unsigned n);
+void AddShadowExtraSlots(const ShadowSlotOvr* s, unsigned n);
 
 RfxBindState ApplyDrawBindings(reshade::api::command_list* cmd_list, ID3D12GraphicsCommandList* cl,
     const std::vector<WclSlotOvr>& binds, bool guard_bindless);

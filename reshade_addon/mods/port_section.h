@@ -13,6 +13,7 @@ struct CsTrig {
 };
 
 inline const unsigned kDx11SkeletonCbByteWidth = 16384;
+inline const unsigned kDx11ObjectCbByteWidth = 1024;
 inline const unsigned kBonesCbufferBytes = 12288;
 
 struct PortHooks {
@@ -33,8 +34,8 @@ extern std::mutex                                 g_cs_trigs_mtx;
 extern std::shared_ptr<const std::vector<CsTrig>> g_cs_trigs_snap;
 
 bool         SectionReadsPipelineState(const wchar_t* fq);
-std::wstring PortComponentSection(int mod_id, int comp_index, const std::wstring& ns);
+std::wstring PortComponentSection(int mod_id, int comp_index, const std::wstring& tail, const std::wstring& ns);
 bool         PortRunSection(const std::wstring& fq_section, PortHooks& hk,
-    uint32_t index_count, uint32_t first_index, uint32_t first_instance,
+    uint32_t index_count, uint32_t first_index, uint32_t first_instance, uint64_t pso,
     bool& skip_orig);
 bool         LogBudget(const char* tag, const std::wstring& ns, int limit);

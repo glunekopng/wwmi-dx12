@@ -15,7 +15,6 @@ void               ModTexturesTick();                                           
 void               Heartbeat(uint32_t texinj_last);                                                  // present_diag.cpp
 void               HealthHeartbeat();                                                                // present_diag.cpp
 void               LoadGeometryMods();                                                               // present_mod_load.cpp
-WWMI_DEBUG_FN void SampleMemoryOncePerSecond() WWMI_DEBUG_BODY();                                    // profiler_mem.cpp
 
 extern std::wstring g_cfg_engine_path;
 extern std::wstring g_cfg_db_path;

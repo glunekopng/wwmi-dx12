@@ -1,5 +1,6 @@
 // See dx12_bridge.h.
 #include "dx12_bridge.h"
+#include "port_toggles.h"
 #include "../../src/log.h"
 #include <mutex>
 #include <vector>
@@ -18,6 +19,7 @@ static std::atomic<unsigned long long>      s_wrong_disp{ 0 };
 static thread_local Dx12Bridge              t_bridge; // X30: this thread's innermost open scope
 static thread_local std::vector<Dx12Bridge> t_stack;  // X30: what this thread's scopes were built from
 static thread_local unsigned                t_depth = 0;
+static thread_local bool                    t_game_state_owed = false;
 
 static std::atomic<unsigned long long> s_foreign_cl{ 0 };
 
@@ -54,8 +56,26 @@ unsigned long long BridgeForeignListRefusals()
     return s_foreign_cl.load(std::memory_order_relaxed);
 }
 
+void OweGameState(const Dx12Bridge& b)
+{
+    if (!b.restore_game_state) return;
+    if (t_depth && g_lazy_restore) {
+        t_game_state_owed = true;
+        return;
+    }
+    b.restore_game_state(b.restore_user);
+}
+
+void PayGameState()
+{
+    if (!t_game_state_owed) return;
+    t_game_state_owed = false;
+    if (t_depth && t_bridge.restore_game_state) t_bridge.restore_game_state(t_bridge.restore_user);
+}
+
 void BridgePush(const Dx12Bridge& scoped)
 {
+    PayGameState();
     const unsigned long tid = GetCurrentThreadId();
     // X30: another thread's scope currently owns the global bridge.
     const unsigned long owner = s_owner_tid.load(std::memory_order_relaxed);
@@ -80,6 +100,7 @@ void BridgePush(const Dx12Bridge& scoped)
 
 void BridgePop()
 {
+    PayGameState();
     if (t_depth) {
         --t_depth;
         if (!t_stack.empty()) {

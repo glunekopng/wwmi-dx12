@@ -34,6 +34,8 @@ unsigned long long BridgeForeignListRefusals();          // times a thread was h
 void               BridgePush(const Dx12Bridge& scoped); // DrawListScope ctor: `scoped` already carries cl/restore/roots
 void               BridgePop();                          // DrawListScope dtor
 unsigned           BridgeDepth();                        // open scopes, all threads
+void               OweGameState(const Dx12Bridge& b);    // after our compute work on the game's list
+void               PayGameState();                       // before anything that draws with the game's state
 bool               BridgeNoteIssue(ID3D12GraphicsCommandList* cl, bool dispatch, unsigned a, unsigned b, unsigned c);
 unsigned long long BridgeDisplacedCount();
 unsigned long long BridgeWrongListDraws();
@@ -71,6 +73,7 @@ void                  DisownBuffer(ID3D12Resource* res);
 bool                  OwnedBuffer(ID3D12Resource* res);
 D3D12_RESOURCE_STATES OwnedTransition(ID3D12GraphicsCommandList* cl, ID3D12Resource* res, D3D12_RESOURCE_STATES to);
 void                  ListBuffersToCommon(ID3D12GraphicsCommandList* cl);
+void                  FlushUavBarriers(ID3D12GraphicsCommandList* cl);
 void                  ListBuffersForget(ID3D12GraphicsCommandList* cl);
 void                  ReleaseShimObject(void* object);
 // True for a buffer the GAME owns (a wrapper PushGameConstantBuffer and friends made) -- never a mod skeleton.

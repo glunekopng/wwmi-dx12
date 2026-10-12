@@ -15,9 +15,10 @@ struct SubDraw {
 };
 
 struct Component {
-    int      index = -1;  // N in [TextureOverrideComponentN]
-    uint32_t ib_hash = 0; // section `hash =` (the game IB's 3dmigoto hash) -- DX11 scopes
-                          // match_first_index to THIS; used for (ib_hash, first_index) matching
+    int          index = -1;  // N in [TextureOverrideComponentN]; a part named otherwise is numbered after them
+    std::wstring tail;        // the section's name under its namespace: Component0, Component0_ib0, ...
+    uint32_t     ib_hash = 0; // section `hash =` (the game IB's 3dmigoto hash) -- DX11 scopes
+                              // match_first_index to THIS; used for (ib_hash, first_index) matching
     uint32_t             match_first_index = 0;
     uint32_t             match_index_count = 0;
     uint32_t             vg_offset = 0;    // $\WWMIv1\vg_offset (merge destination)
@@ -47,6 +48,7 @@ struct Mod {
     std::wstring forward_map_file;
     int          object_guid = 0;
     uint32_t     mesh_vertex_count = 0;
+    bool         queries_ps_slots = false;
 };
 
 int ReadComponentsFromEngine(const std::wstring& ns, Mod& out);

@@ -1,6 +1,9 @@
 #pragma once
 #include <reshade.hpp>
 void DrawOverlay(reshade::api::effect_runtime* runtime);
+void DrawOverlayPanel(reshade::api::effect_runtime* runtime);
+bool OnOverlayOpen(reshade::api::effect_runtime* runtime, bool open, reshade::api::input_source source);
+void DockOverlayPanelOnce();
 void DrawStoppedNotice(reshade::api::effect_runtime* runtime); // ReShade's on-screen display, while g_rt_blocked or g_faulted is fresh
 
 // Overlay controls that carry their id (overlay.cpp): "H20. label". Shared with the RT module's section.

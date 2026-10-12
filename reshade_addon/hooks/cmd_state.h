@@ -52,13 +52,30 @@ struct IndexBind {
     ID3D12Resource* res = nullptr;   // IB resource (frame-dump capture needs the object, not just the VA)
 };
 
+constexpr unsigned kSectionTexRegs = 9; // ps-t0..t8: the game's textures a component section sees
+
+// Per list: where the last character draw that read each of those registers found its texture (draw_comp.cpp
+// CarryPsReads), and the root signature, of which recording, the registers' places were taken from.
+struct PsCarry {
+    struct Slot {
+        reshade::api::descriptor_table table = {};
+        uint32_t                       offset = 0;
+        uint64_t                       gen = 0; // the recording it was noted in (CmdGen)
+    };
+    Slot     slot[kSectionTexRegs];
+    uint64_t layout = 0;
+    uint64_t layout_gen = 0;
+    uint8_t  param[kSectionTexRegs] = {};
+    uint32_t offset[kSectionTexRegs] = {};
+};
+
 struct CmdState {
     RootParam  root[64];
     uint32_t   ctable_seq_next = 0;
     VertexBind vb[16];
     IndexBind  ib;
     uint64_t   gfx_pso = 0; // currently-bound graphics PSO (reshade pipeline handle == ID3D12PipelineState*)
-    uint64_t   gfx_set = 0; // what is actually set in its place (the decensor variant); 0 = gfx_pso itself
+    uint64_t   gfx_set = 0; // what is actually set in its place (the UID-cut or decensor variant); 0 = gfx_pso itself
     uint64_t   gfx_restore() const { return gfx_set ? gfx_set : gfx_pso; }
     uint64_t   cmp_pso = 0;
 
@@ -71,6 +88,7 @@ struct CmdState {
     bool           blend_factor_set = false;
     uint32_t       stencil_ref = 0;
     bool           stencil_ref_set = false;
+    PsCarry        ps_carry;
 };
 inline std::unordered_map<uintptr_t, CmdState> g_cmd_state; // a null list's state (see CmdGfx below)
 

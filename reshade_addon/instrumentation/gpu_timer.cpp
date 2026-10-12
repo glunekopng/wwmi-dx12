@@ -30,7 +30,10 @@ int GpuTimer::Begin(ID3D12GraphicsCommandList* cl, int bucket)
     if (!g_prof_enabled || !cl || !heap_ || bucket < 0 || bucket >= GT_COUNT) return -1;
     const UINT r = region_.load(std::memory_order_acquire);
     const UINT p = next_pair_[r].fetch_add(1, std::memory_order_relaxed);
-    if (p >= kPairs) return -1;
+    if (p >= kPairs) {
+        g_gt_untimed.fetch_add(1, std::memory_order_relaxed);
+        return -1;
+    }
     pair_bucket_[r][p] = (uint8_t)bucket;
     const UINT pair = r * kPairs + p;
     cl->EndQuery(heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, pair * 2);
@@ -68,7 +71,7 @@ void GpuTimer::FrameSubmitted(ID3D12Fence* fence, uint64_t value, ID3D12CommandQ
 
 void GpuTimer::PresentTick(ID3D12Device* dev)
 {
-    if (!Ensure(dev) || !fence_) return;
+    if ((!heap_ && !g_prof_enabled) || !Ensure(dev) || !fence_) return;
     const uint64_t done = fence_->GetCompletedValue();
     const UINT     cur = region_.load(std::memory_order_relaxed);
     for (UINT i = 1; i < kRing; ++i) { // oldest first, so consecutive marks pair up
@@ -97,14 +100,6 @@ void GpuTimer::ReadRegion(UINT r)
         if (t0 && t1 && t1 >= t0 && b < GT_COUNT) {
             g_gt_ns[b].fetch_add((uint64_t)((double)(t1 - t0) * ns_per_tick), std::memory_order_relaxed);
             g_gt_n[b].fetch_add(1, std::memory_order_relaxed);
-            if (b == GT_Present) { // present-list start to start: the GPU's frame period
-                if (last_mark_ && t0 > last_mark_ && last_mark_region_ == (r + kRing - 1) % kRing) {
-                    g_gt_frame_ns.fetch_add((uint64_t)((double)(t0 - last_mark_) * ns_per_tick), std::memory_order_relaxed);
-                    g_gt_frame_n.fetch_add(1, std::memory_order_relaxed);
-                }
-                last_mark_ = t0;
-                last_mark_region_ = r;
-            }
         }
     }
     std::memset(v, 0, bytes);

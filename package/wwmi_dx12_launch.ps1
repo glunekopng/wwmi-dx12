@@ -5,6 +5,7 @@ $dir    = $PSScriptRoot
 $proc   = "Client-Win64-Shipping"
 $proxy  = [IO.Path]::Combine($dir, "dxgi.dll")
 $ini    = [IO.Path]::Combine($dir, "wwmi_dx12.ini")
+$minReShade = [version]"6.8.0"
 
 function Wait-Key {
     Write-Host "Press any key to exit."
@@ -94,6 +95,21 @@ function Test-ReShade([string]$dll) {
 }
 function Test-GameRunning { return [bool](Get-Process $proc -ErrorAction SilentlyContinue) }
 
+function Get-AddonVersion {
+    try {
+        $files = @([IO.Path]::Combine($dir, "wwmi_dx12.addon64"))
+        $addonPathDir = Resolve-Dir (Get-ReShadeAddonPath ([IO.Path]::Combine($dir, "ReShade.ini")))
+        if ($addonPathDir) { $files += [IO.Path]::Combine($addonPathDir, "wwmi_dx12.addon64") }
+        $newest = $files | Where-Object { [IO.File]::Exists($_) } | Sort-Object { [IO.File]::GetLastWriteTimeUtc($_) } | Select-Object -Last 1
+        if (-not $newest) { return "not found" }
+        $info = [Diagnostics.FileVersionInfo]::GetVersionInfo($newest)
+        if (-not $info.ProductVersion) { return "unknown" }
+        if ($info.Comments) { return "$($info.ProductVersion) (build $($info.Comments))" }
+        return $info.ProductVersion
+    } catch { return "unknown" }
+}
+
+Write-Host "WWMI-DX12 launcher" -ForegroundColor Cyan
 if (-not [IO.File]::Exists([IO.Path]::Combine($dir, "$proc.exe"))) {
     Fail "This launcher must be in the game's Client\Binaries\Win64 folder (next to $proc.exe)."
 }
@@ -174,6 +190,11 @@ if (-not [IO.File]::Exists($proxy)) {
 if (-not (Test-ReShade $proxy)) {
     Fail "dxgi.dll in this folder is not ReShade. Remove or rename it, then install ReShade (with full add-on support) here."
 }
+$reshadeInfo = [Diagnostics.FileVersionInfo]::GetVersionInfo($proxy)
+$reshadeVersion = New-Object Version($reshadeInfo.FileMajorPart, $reshadeInfo.FileMinorPart, $reshadeInfo.FileBuildPart)
+if ($reshadeVersion -lt $minReShade) {
+    Fail "ReShade $reshadeVersion (dxgi.dll) is too old: the add-on needs ReShade $minReShade or newer. Install the current ReShade, with full add-on support, here."
+}
 
 # Read-only while the game starts: it rewrites Engine.ini and drops settings it does not keep.
 $engineIni = [IO.Path]::Combine($root, "Client\Saved\Config\WindowsNoEditor\Engine.ini")
@@ -233,9 +254,60 @@ function Clear-EngineReadOnly {
     }
 }
 
-$tier = "hd"
-foreach ($t in "uhd", "hd", "sd") {
-    if ([IO.Directory]::Exists([IO.Path]::Combine($root, "Client", "Content", $t.ToUpper()))) { $tier = $t; break }
+$tiers = @("uhd", "hd", "sd")
+$installed = @($tiers | Where-Object { [IO.Directory]::Exists([IO.Path]::Combine($root, "Client", "Content", $_.ToUpper())) })
+$tier = if ($installed.Count) { $installed[0] } else { "hd" }
+
+function Write-Graphics {
+    Write-Host -NoNewline "  Graphics       "
+    foreach ($t in $tiers) {
+        $name = $t.ToUpper()
+        if ($t -eq $tier) { Write-Host -NoNewline "[$name]" -ForegroundColor Cyan }
+        elseif ($installed -contains $t) { Write-Host -NoNewline " $name " }
+        else { Write-Host -NoNewline " $name " -ForegroundColor DarkGray }
+        Write-Host -NoNewline "  "
+    }
+    $note = if ($installed -contains $tier) { "(installed)" } else { "(not found in this game folder)" }
+    Write-Host $note.PadRight(34)
+}
+Write-Host ""
+Write-Host "  Add-on         $(Get-AddonVersion)"
+Write-Host "  Game folder    $root"
+Write-Host "  WWMI folder    $resolved"
+Write-Host "  ReShade        $reshadeVersion"
+$graphicsRow = -1
+try { $graphicsRow = [Console]::CursorTop } catch {}
+Write-Graphics
+Write-Host ""
+Write-Host "  Left / Right   choose the graphics files"
+Write-Host "  Esc            quit"
+Write-Host "  any other key  start the game"
+while ($true) {
+    try { $key = [Console]::ReadKey($true) } catch { break }
+    if ($key.Key -eq [ConsoleKey]::Escape) { exit 0 }
+    $step = 0
+    if (@([ConsoleKey]::LeftArrow, [ConsoleKey]::UpArrow) -contains $key.Key) { $step = -1 }
+    elseif (@([ConsoleKey]::RightArrow, [ConsoleKey]::DownArrow, [ConsoleKey]::Tab) -contains $key.Key) { $step = 1 }
+    if ($step -eq 0) { break }
+    $tier = $tiers[([array]::IndexOf($tiers, $tier) + $step + $tiers.Count) % $tiers.Count]
+    try {
+        $back = [Console]::CursorTop
+        [Console]::SetCursorPosition(0, $graphicsRow)
+        Write-Graphics
+        [Console]::SetCursorPosition(0, $back)
+    } catch { Write-Graphics }
+}
+Write-Host ""
+
+function Hide-LauncherWindow {
+    try {
+        Add-Type -Namespace WwmiDx12 -Name Console -MemberDefinition @'
+[DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
+[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+'@
+        $window = [WwmiDx12.Console]::GetConsoleWindow()
+        if ($window -ne [IntPtr]::Zero) { [void][WwmiDx12.Console]::ShowWindow($window, 6) }
+    } catch {}
 }
 
 $problem = ""
@@ -253,7 +325,8 @@ try {
         Start-Sleep -Seconds 1
     }
     if (-not $problem) {
-        Write-Host "Game starting. This window closes by itself in a minute, once the game has read its settings."
+        Write-Host "Game starting. This window minimizes and closes by itself in a minute, once the game has read its settings."
+        Hide-LauncherWindow
         Start-Sleep -Seconds 60
     }
 }

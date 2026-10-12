@@ -13,4 +13,6 @@ inline bool g_port_post_split = true;
 
 inline bool g_buffers_in_vram = true;
 
+inline bool g_lazy_restore = true;
+
 } // namespace MigotoPort

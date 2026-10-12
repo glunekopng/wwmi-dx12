@@ -39,6 +39,7 @@ template <class I>
 class WrapBase : public I {
 public:
     ULONG STDMETHODCALLTYPE AddRef() override { return (ULONG)InterlockedIncrement(&rc_); }
+    LONG                    RefCount() const { return rc_; }
     ULONG STDMETHODCALLTYPE Release() override
     {
         LONG n = InterlockedDecrement(&rc_);
@@ -91,6 +92,12 @@ void RetireDx12Resource(ID3D12Resource* res);
 void RetireReadback(ID3D12Resource* res);
 void DisownBuffer(ID3D12Resource* res);
 
+struct UploadRecord {
+    uint64_t                   seq = 0;
+    ID3D12GraphicsCommandList* list = nullptr;
+    uint64_t                   recording = 0;
+};
+
 struct WrapResource {
     WrapResource() { WrapResourceBorn(); }
     ID3D12Resource*                    dx12 = nullptr;
@@ -104,6 +111,9 @@ struct WrapResource {
     UINT                               row_pitch = 0; // 0 = not a staging texture
     UINT                               rows = 0;
     std::vector<unsigned char>         uploaded;
+    uint64_t                           uploaded_seq = 0;
+    uint64_t                           queued_seq = 0;
+    UploadRecord                       flushed;
     virtual ~WrapResource()
     {
         WrapResourceDied();

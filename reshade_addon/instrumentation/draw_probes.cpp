@@ -30,14 +30,15 @@ void DrawProbesClaim(const DrawArgs& da, DrawClaim& dc)
                 logger::trace("CLAIMHIT comp first=%u count=%u vs=%016llx vb0=%llx claimed=%d",
                     first_index, index_count, vs_hash, vb0dbg, (int)(mc != nullptr));
                 {
-                    int             md2 = g_merged_comps[it->second].mod_id;
-                    const uint32_t  maxEnd = ModIndexEnd(md2);
-                    ID3D12Resource* ibr = nullptr;
-                    ID3D12Resource* vbr = nullptr;
-                    uint64_t        ibva = 0;
-                    uint64_t        vbva = 0;
-                    uint32_t        idxb = 2;
-                    uint32_t        vstride = 0;
+                    int                       md2 = g_merged_comps[it->second].mod_id;
+                    const WwmiMod::Component* wc2 = WmodComp(md2, g_merged_comps[it->second].comp_idx);
+                    const uint32_t            maxEnd = ModIndexEnd(md2, wc2 ? wc2->ib_hash : 0u);
+                    ID3D12Resource*           ibr = nullptr;
+                    ID3D12Resource*           vbr = nullptr;
+                    uint64_t                  ibva = 0;
+                    uint64_t                  vbva = 0;
+                    uint32_t                  idxb = 2;
+                    uint32_t                  vstride = 0;
                     {
                         auto& st = CmdGfx(cmd_list);
                         ibr = st.ib.res;
@@ -51,7 +52,6 @@ void DrawProbesClaim(const DrawArgs& da, DrawClaim& dc)
                         uint32_t                  iboff = (uint32_t)(ibva - ibr->GetGPUVirtualAddress());
                         uint32_t                  vboff = (uint32_t)(vbva - vbr->GetGPUVirtualAddress());
                         uint32_t                  got = IbHash::Lookup(ibr, iboff, maxEnd * idxb, idxb, vbr, vboff, vstride);
-                        const WwmiMod::Component* wc2 = WmodComp(md2, g_merged_comps[it->second].comp_idx);
                         logger::trace("IBHASH-ANCHOR mod=%d ibBytes=%u vstride=%u ourVbHash=%08x iniHash=%08x %s",
                             md2, maxEnd * idxb, vstride, got, wc2 ? wc2->ib_hash : 0,
                             (got && wc2 && got == wc2->ib_hash) ? "*** MATCH ***" : (got ? "nomatch" : "pending"));

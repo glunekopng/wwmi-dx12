@@ -15,6 +15,8 @@
 //  ID3D11InputLayout stand-in whose GetPrivateData returns the blob they expect. Their code is
 //  unchanged -- it cannot tell the difference.
 // ---------------------------------------------------------------------------------------------
+class HackerInputLayout;
+
 namespace MigotoPort {
 
 struct InputElement {
@@ -32,5 +34,9 @@ void SetCurrentInputLayout(unsigned long long pipeline_handle);
 ::ID3D11InputLayout* CurrentInputLayout();
 
 unsigned DescribeInputLayout(unsigned long long pipeline_handle, char* buf, unsigned n);
+
+HackerInputLayout* HackerInputLayoutOf(unsigned long long pipeline_handle);
+
+HackerInputLayout* NewHackerInputLayout(const D3D11_INPUT_ELEMENT_DESC* elements, unsigned count);
 
 } // namespace MigotoPort

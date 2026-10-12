@@ -1003,14 +1003,12 @@ void TexHashFromUpload(ID3D12Resource* dest, const uint8_t* src, size_t src_row_
     uint32_t       crc = TexIdentityHash(data_hash, w, h, d.MipLevels ? d.MipLevels : 1,
         d.DepthOrArraySize ? d.DepthOrArraySize : 1, fmt);
     const uint32_t prev = TexHashOf(reinterpret_cast<uint64_t>(dest));
-#ifdef WWMI_DEBUG
     g_th_all.fetch_add(1, std::memory_order_relaxed);
     g_th_bytes.fetch_add(tight.size(), std::memory_order_relaxed);
     if (prev) {
         g_th_rehash.fetch_add(1, std::memory_order_relaxed);
         if (prev == crc) g_th_same.fetch_add(1, std::memory_order_relaxed);
     }
-#endif
     bool inherited = false;
     bool restamped = false;
     {

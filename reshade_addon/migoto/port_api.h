@@ -59,6 +59,7 @@ struct DrawInfo {
     bool     depth_active = false;
     bool     depth_known = false; // false = caller did not say; the filter then does nothing
     uint32_t srv_gen_at_entry = 0;
+    uint64_t pso = 0;
 };
 
 // [ShaderOverride] dispatch by shader hash. Returns true if a section matched and ran.
@@ -77,9 +78,16 @@ float BoundShaderFilter(char stage, uint64_t* out_hash, int* out_have_handle, in
 
 void RegisterShaderHash(uint64_t ini_hash);
 
+// A shader the add-on patches itself in place of [ShaderRegex<group>] of namespace `ns`: that group's filter_index
+// and command lists are linked to it, as their regex match links them (filter_index for `ps == x`).
+bool LinkShaderRegexGroup(uint64_t ini_hash, const wchar_t* ns, const wchar_t* group);
+bool ShaderRegexLinked(uint64_t ini_hash);
+bool ShaderRegexGroupLoaded(const wchar_t* ns, const wchar_t* group);
+
 int DispatchTextureOverride(uint32_t texture_hash, DrawInfo* draw);
 
 bool RunSectionByName(const wchar_t* fq_section, DrawInfo* draw);
+bool RunSectionThenPost(const wchar_t* fq_section, DrawInfo* draw);
 
 // Does a section of that name exist? The name index behind it is built once per load generation.
 bool HasSection(const wchar_t* fq_section);
@@ -89,9 +97,14 @@ bool GetSectionValue(const wchar_t* fq_section, const wchar_t* key, wchar_t* out
 void ForEachSectionKey(const wchar_t* fq_section,
     void (*cb)(const wchar_t* key, const wchar_t* val, void* user), void* user);
 
+void ForEachSectionLine(const wchar_t* fq_section, void (*cb)(const wchar_t* line, void* user), void* user);
+
+void ForEachSectionInNs(const wchar_t* ns, void (*cb)(const wchar_t* fq_section, void* user), void* user);
+
 bool SectionFolder(const wchar_t* fq_section, wchar_t* out, size_t out_chars);
 
 void GetIniParams(float* out_rgba, int texels);
+bool GetIniParam(unsigned texel, float out_rgba[4]);
 
 void PushGameConstantBuffer(char stage, unsigned slot, ID3D12Resource* res,
     unsigned long long gpu_va, unsigned dx11_byte_width);
@@ -100,7 +113,7 @@ void PushGameConstantBufferRecord(char stage, unsigned slot, ID3D12Resource* res
     unsigned long long gpu_va, unsigned dx11_byte_width);
 bool PipeStateCbBound(char stage, unsigned slot);
 
-int PushGameTexture(char stage, unsigned slot, ID3D12Resource* res, unsigned content_hash);
+int PushGameTexture(char stage, unsigned slot, ID3D12Resource* res, unsigned content_hash, unsigned view_format = 0);
 // Clears <stage>-tN only while it still holds what PushGameTexture put there.
 void UnpushGameTexture(char stage, unsigned slot);
 // Some [TextureOverride] section is keyed on this hash (true before the first parse).
@@ -117,7 +130,7 @@ bool PipeStateVbBound(unsigned slot);
 enum PushUavResult {
     kPushUavPublished = 0,   // bound at cs-uN; `cs-u0` is now answerable
     kPushUavCleared = 1,     // res was null: slot cleared, as asked
-    kPushUavModOwnsSlot = 2, // a MOD's UAV is already there -- correct to decline, DX11 order preserved
+    kPushUavOverMod = 2,     // published OVER a mod's UAV an earlier list left there
     kPushUavNoContext = 3,   // no pass-through context: the setter would have done nothing
     kPushUavNotLoaded = 4,   // ini engine not loaded
     kPushUavBadSlot = 5,     // slot >= kMaxUAV

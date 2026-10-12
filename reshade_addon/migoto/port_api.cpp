@@ -176,6 +176,7 @@ DrawListScope::DrawListScope(ID3D12GraphicsCommandList* cl, void (*restore_game_
 
 DrawListScope::~DrawListScope()
 {
+    MigotoPort::FlushUavBarriers(MigotoPort::GetDx12Bridge().cl);
     MigotoPort::BridgePop();
 }
 

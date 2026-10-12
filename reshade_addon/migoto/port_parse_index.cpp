@@ -5,11 +5,15 @@
 #include "CommandList.h"
 #include "ResourceHash.h"
 #include "HackerDevice.h"
+#include "ShaderRegex.h"
 #include "port_keygate.h"
 #include "../../src/log.h"
 
 #include <atomic>
+#include <cfloat>
 #include <cstdio>
+#include <cwctype>
+#include <mutex>
 #include <functional>
 #include <map>
 #include <string>
@@ -343,6 +347,108 @@ bool ModDeclaresHash(const wchar_t* ns, unsigned hash)
     return false;
 }
 
+bool GetIniParam(unsigned texel, float out_rgba[4])
+{
+    for (int i = 0; i < 4; ++i) out_rgba[i] = 0.f;
+    if (!g_loaded) return false;
+    std::lock_guard<std::recursive_mutex> engine_lk(EngineLock());
+    if (texel >= G->iniParams.size()) return false;
+    out_rgba[0] = G->iniParams[texel].x;
+    out_rgba[1] = G->iniParams[texel].y;
+    out_rgba[2] = G->iniParams[texel].z;
+    out_rgba[3] = G->iniParams[texel].w;
+    return true;
+}
+
+namespace {
+std::wstring LowerNs(const wchar_t* ns)
+{
+    std::wstring s = ns ? ns : L"";
+    for (auto& ch : s) ch = (wchar_t)towlower(ch);
+    return s;
+}
+
+bool Linkable(ShaderRegexGroup& g)
+{
+    return g.filter_index != FLT_MAX || !g.command_list.noop() || !g.post_command_list.noop();
+}
+
+std::wstring GroupId(const std::wstring& key)
+{
+    const size_t a = key.find(L'\\');
+    const size_t b = key.rfind(L'\\');
+    if (a == std::wstring::npos || b <= a) return std::wstring();
+    return LowerNs(key.substr(a + 1).c_str());
+}
+
+std::wstring GroupId(const wchar_t* ns, const wchar_t* group)
+{
+    return LowerNs(ns) + L"\\" + LowerNs(group);
+}
+
+struct ShaderRegexLinks {
+    std::mutex                       mtx;
+    unsigned                         gen = ~0u;
+    std::unordered_set<uint64_t>     linked;
+    std::unordered_set<std::wstring> loaded;
+    void                             ForReload()
+    {
+        if (gen == g_generation) return;
+        gen = g_generation;
+        linked.clear();
+        loaded.clear();
+        for (auto& kv : shader_regex_groups) {
+            if (!Linkable(kv.second)) continue;
+            const std::wstring id = GroupId(kv.first);
+            if (!id.empty()) loaded.insert(id);
+        }
+    }
+};
+ShaderRegexLinks g_regex_links;
+} // namespace
+
+bool ShaderRegexGroupLoaded(const wchar_t* ns, const wchar_t* group)
+{
+    if (!g_loaded || !ns || !group) return false;
+    std::lock_guard<std::recursive_mutex> engine_lk(EngineLock());
+    std::lock_guard<std::mutex>           l(g_regex_links.mtx);
+    g_regex_links.ForReload();
+    return g_regex_links.loaded.count(GroupId(ns, group)) != 0;
+}
+
+bool ShaderRegexLinked(uint64_t ini_hash)
+{
+    std::lock_guard<std::mutex> l(g_regex_links.mtx);
+    return g_regex_links.gen == g_generation && g_regex_links.linked.count(ini_hash) != 0;
+}
+
+bool LinkShaderRegexGroup(uint64_t ini_hash, const wchar_t* ns, const wchar_t* group)
+{
+    if (!g_loaded || !ini_hash || !ns || !group) return false;
+    std::lock_guard<std::recursive_mutex> engine_lk(EngineLock());
+    const std::wstring                    want = GroupId(ns, group);
+    ShaderRegexGroup*                     found = nullptr;
+    const std::wstring*                   name = nullptr;
+    for (auto& kv : shader_regex_groups) {
+        if (!Linkable(kv.second) || GroupId(kv.first) != want) continue;
+        found = &kv.second;
+        name = &kv.first;
+        break;
+    }
+    if (!found) return false;
+    {
+        std::lock_guard<std::mutex> l(g_regex_links.mtx);
+        g_regex_links.ForReload();
+        if (!g_regex_links.linked.insert(ini_hash).second) return true;
+    }
+    found->link_command_lists_and_filter_index(ini_hash);
+    RebuildOverrideHashes();
+    logger::write("SHADERREGEX-LINK %016llx -> [%ls] filter_index=%g: the add-on's own patch of this shader stands for "
+                  "the group's regex match",
+        (unsigned long long)ini_hash, name->c_str(), found->filter_index == FLT_MAX ? -1.0 : (double)found->filter_index);
+    return true;
+}
+
 void GetIniParams(float* out_rgba, int texels)
 {
     if (!out_rgba || texels <= 0) return;
@@ -382,10 +488,33 @@ void ForEachSectionKey(const wchar_t* fq_section,
         cb(l.first.c_str(), l.second.c_str(), user);
 }
 
+void ForEachSectionLine(const wchar_t* fq_section, void (*cb)(const wchar_t* line, void* user), void* user)
+{
+    if (!g_loaded || !fq_section || !cb) return;
+    std::lock_guard<std::recursive_mutex> engine_lk(EngineLock());
+    IniSectionVector*                     sv = nullptr;
+    GetIniSection(&sv, fq_section);
+    if (!sv) return;
+    for (const IniLine& l : *sv) cb(l.raw_line.c_str(), user);
+}
+
 static void ForEachSectionName(const std::function<void(const std::wstring&)>& fn)
 {
     for (auto& kv : SectionIndex()) fn(kv.first);
     for (auto& kv : ExplicitIndex()) fn(kv.first);
+}
+
+void ForEachSectionInNs(const wchar_t* ns, void (*cb)(const wchar_t* fq_section, void* user), void* user)
+{
+    if (!g_loaded || !ns || !*ns || !cb) return;
+    std::lock_guard<std::recursive_mutex> engine_lk(EngineLock());
+    const size_t                          n = wcslen(ns);
+    ForEachSectionName([&](const std::wstring& name) {
+        const size_t first = name.find(L'\\');
+        const size_t last = name.find_last_of(L'\\');
+        if (first == std::wstring::npos || last == std::wstring::npos || last <= first || last - first - 1 != n) return;
+        if (_wcsnicmp(name.c_str() + first + 1, ns, n) == 0) cb(name.c_str(), user);
+    });
 }
 
 bool ResolveSection(const wchar_t* ns, const wchar_t* ns_hint2, const wchar_t* section,

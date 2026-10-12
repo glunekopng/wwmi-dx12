@@ -61,6 +61,12 @@ struct ShimVbRecord {
     UINT                      stride = 0;
 };
 
+struct LayoutOverride {
+    unsigned long long              pso = 0;
+    const D3D11_INPUT_ELEMENT_DESC* elements = nullptr;
+    UINT                            count = 0;
+};
+
 struct PipeState {
     ID3D11DeviceChild*         shader[kStages] = {};
     ID3D11Buffer*              cb[kStages][kMaxCB] = {};
@@ -81,6 +87,7 @@ struct PipeState {
     DXGI_FORMAT              ib_format = DXGI_FORMAT_UNKNOWN;
     UINT                     ib_offset = 0;
     ID3D11InputLayout*       layout = nullptr;
+    LayoutOverride           layout_override;
     D3D11_PRIMITIVE_TOPOLOGY topology = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
 
     ID3D11BlendState*        blend = nullptr;
@@ -146,9 +153,11 @@ void SetBufCopyShader(const void* dxil, size_t bytes);
 bool CopyBufferCs(ID3D12GraphicsCommandList* cl, struct WrapResource* dst, UINT64 dst_off,
     struct WrapResource* src, UINT64 src_off, UINT64 bytes);
 
-void QueueUpload(ID3D11Resource* dst, const void* data, size_t bytes);
-void QueueTextureUpload(ID3D11Resource* dst, const D3D11_SUBRESOURCE_DATA* data, UINT subresources);
-void FlushPendingUploads(ID3D12GraphicsCommandList* cl);
+void     QueueUpload(ID3D11Resource* dst, const void* data, size_t bytes, uint64_t seq = 0);
+void     QueueTextureUpload(ID3D11Resource* dst, const D3D11_SUBRESOURCE_DATA* data, UINT subresources, uint64_t seq = 0);
+void     FlushPendingUploads(ID3D12GraphicsCommandList* cl);
+uint64_t NextUploadSeq();
+bool     ListHoldsUpload(ID3D12GraphicsCommandList* cl, const struct WrapResource* wr);
 
 // Descriptor heaps OURS alone. Never the game's shared bindless heap.
 bool                        EnsureHeaps();
@@ -157,8 +166,6 @@ bool                        ShaderVisibleCopy(D3D12_CPU_DESCRIPTOR_HANDLE src, D
 D3D12_CPU_DESCRIPTOR_HANDLE AllocStagingDescriptor(char kind, UINT* out_slot);
 void                        ReleaseStagingDescriptor(char kind, UINT slot);
 
-void PortHeapStats(unsigned* staging_used, unsigned* staging_cap, unsigned* staging_freed,
-    unsigned* n_rootsigs, unsigned* n_psos);
 
 // GAME PIPELINE STATE INHERITANCE -- attempted, REMOVED, do not rebuild it this way.
 // The idea: an injected draw should inherit the GAME's raster/depth (on DX11 it does, implicitly, by

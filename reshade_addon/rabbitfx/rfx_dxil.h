@@ -14,12 +14,23 @@
 #include <string>
 #include <vector>
 
+// A box of the render target in pixels, and the vertex colour range a pixel inside it is discarded for.
+struct RfxDxilCut {
+    float x0; // SV_Position.xy in [x0, x1) x [y0, y1)
+    float y0;
+    float x1;
+    float y1;
+    float lo[3]; // COLOR0.rgb in [lo, hi]
+    float hi[3];
+};
+
 struct RfxDxilSpec {
-    unsigned glow_reg = 50;   // Texture2D: the GlowMap
-    unsigned fx_reg = 51;     // Texture2D: the FX map
-    unsigned params_reg = 52; // Buffer<float4>: [0] = hue turns, sat bias, val bias, brightness (x217..w217)
-    bool     decensor = false;
-    bool     inject = true; // false: the decensor constants only, no SRVs added (the game's own root signature)
+    unsigned                glow_reg = 50;   // Texture2D: the GlowMap
+    unsigned                fx_reg = 51;     // Texture2D: the FX map
+    unsigned                params_reg = 52; // Buffer<float4>: [0] = hue turns, sat bias, val bias, brightness (x217..w217)
+    bool                    decensor = false;
+    bool                    inject = true; // false: the decensor constants only, no SRVs added (the game's own root signature)
+    std::vector<RfxDxilCut> cuts;          // not empty: these cuts alone -- no RabbitFX blocks, no decensor
 };
 
 struct RfxDxilResult {

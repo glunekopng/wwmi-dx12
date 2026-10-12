@@ -10,11 +10,14 @@
 #include "../instrumentation/device_watch.h"
 #include "../config.h"     // g_skip_engine_tick (A9)
 #include "../ui/overlay.h" // DrawStoppedNotice
+#include "../instrumentation/hot_path.h"
+#include "../instrumentation/perf_monitor.h"
+#include "../hud/uid_hide.h"
 
 void on_present_body(command_queue* queue, swapchain* sc)
 {
-    ProfFrameEnd(); // snapshot+reset LAST frame's accumulators (also measures full frame wall time)
-    SampleMemoryOncePerSecond();
+    HotPath::FrameEnd();
+    g_perf.FrameEnd();
     PROF(PROF_Present);
     if (g_rt_blocked || g_faulted) {
         static ULONGLONG s_notice_until = 0;
@@ -38,6 +41,7 @@ void on_present_body(command_queue* queue, swapchain* sc)
     }
     VerboseTick();
     if (g_addon_disabled) return;
+    if (g_hide_uid) g_uid_hide.NoteBackBuffer(sc);
     RemovalPin::Check(g_d3d12_device, "Present");
 
     PresentQueueDiag(queue);

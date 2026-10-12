@@ -8,6 +8,7 @@
 class HackerDevice;
 struct TextureOverride;
 class ExplicitCommandListSection;
+class CustomResource;
 
 namespace PortApi {
 
@@ -31,5 +32,9 @@ std::unordered_map<const void*, std::wstring>&                 CustomResourceNam
 
 // Each extra copy drawn this frame gets its mod's [CommandListUpdateMergedSkeleton] run on its own state (port_skel_copies.cpp).
 void RunSkelCopyUpdates();
+
+// A .dds the background loader has not published yet, loaded now: a copy or a compute bind is about to read it
+// (port_vars.cpp).
+void LoadDeferredNow(CustomResource* r);
 
 } // namespace PortApi

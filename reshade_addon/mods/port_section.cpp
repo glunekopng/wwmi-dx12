@@ -33,9 +33,9 @@ bool SectionReadsPipelineState(const wchar_t* fq)
     return c.hit;
 }
 
-std::wstring PortComponentSection(int mod_id, int comp_index, const std::wstring& ns)
+std::wstring PortComponentSection(int mod_id, int comp_index, const std::wstring& tail, const std::wstring& ns)
 {
-    if (ns.empty()) return std::wstring();
+    if (ns.empty() || tail.empty()) return std::wstring();
     static std::mutex                                  s_mtx;
     static std::map<std::pair<int, int>, std::wstring> s_cache;
     static unsigned                                    s_gen = 0;
@@ -49,16 +49,15 @@ std::wstring PortComponentSection(int mod_id, int comp_index, const std::wstring
     auto key = std::make_pair(mod_id, comp_index);
     auto it = s_cache.find(key);
     if (it == s_cache.end()) {
-        wchar_t            buf[512] = {};
-        const std::wstring sec = L"Component" + std::to_wstring(comp_index);
-        PortApi::ResolveSection(ns.c_str(), nullptr, sec.c_str(), buf, std::size(buf));
+        wchar_t buf[512] = {};
+        PortApi::ResolveSection(ns.c_str(), nullptr, tail.c_str(), buf, std::size(buf));
         it = s_cache.emplace(key, std::wstring(buf)).first;
     }
     return it->second;
 }
 
 bool PortRunSection(const std::wstring& fq_section, PortHooks& hk,
-    uint32_t index_count, uint32_t first_index, uint32_t first_instance,
+    uint32_t index_count, uint32_t first_index, uint32_t first_instance, uint64_t pso,
     bool& skip_orig)
 {
 #define PORT_STAGE(n, msg) \
@@ -181,12 +180,12 @@ bool PortRunSection(const std::wstring& fq_section, PortHooks& hk,
     di.first_index = first_index;
     di.first_instance = first_instance;
     di.indexed = true;
+    di.pso = pso;
 
     PORT_STAGE(2, "callbacks installed, about to run their section");
     CrashHandler::ScopedContext crumb(fq_section.c_str());
     ctx.di = &di;
-    const bool ran = PortApi::RunSectionByName(fq_section.c_str(), &di);
-    PortApi::RunPendingPost();
+    const bool ran = PortApi::RunSectionThenPost(fq_section.c_str(), &di);
     PORT_STAGE(3, "their section returned");
 
     PortApi::SetCommandObserver(nullptr, nullptr);

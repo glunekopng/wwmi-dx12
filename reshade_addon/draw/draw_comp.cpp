@@ -10,6 +10,7 @@
 #include "../hooks/resource_tracker.h"
 #include "../hooks/cmd_bind_hooks.h"
 #include "../mods/layout_registry.h"
+#include "../mods/shader_alias.h"
 #include "../hooks/pipeline_hooks.h"
 #include "../rt/rt_hooks.h"
 #include "draw_ctx.h"
@@ -78,7 +79,7 @@ static double SkBonesRms(const SkBones& a, const SkBones& b)
     return std::sqrt(d / n);
 }
 
-static uint64_t ObjectCbOf(reshade::api::command_list* cl)
+static RootCbvBind ObjectCbOf(reshade::api::command_list* cl)
 {
     int root = -1;
     {
@@ -86,7 +87,7 @@ static uint64_t ObjectCbOf(reshade::api::command_list* cl)
         auto            it = g_layout_b2_root.find(CmdGfxLayout(cl));
         if (it != g_layout_b2_root.end()) root = it->second;
     }
-    return (root >= 0 && root < 64) ? CmdCbv(cl).binds[root].va : 0;
+    return (root >= 0 && root < 64) ? CmdCbv(cl).binds[root] : RootCbvBind{};
 }
 
 static void SkCopyRoll(SkCopyMod& m, int dm)
@@ -137,7 +138,7 @@ static unsigned SkCopySlot(reshade::api::command_list* cl, int dm, int comp, ID3
 {
     *first_sight = false;
     if (!g_skel_copies || dm < 0 || comp < 0) return 0;
-    const uint64_t key = ObjectCbOf(cl);
+    const uint64_t key = ObjectCbOf(cl).va;
     if (!key) return 0;
     std::lock_guard l(g_skcopy_mtx);
     const unsigned  gen = PortApi::LoadGeneration();
@@ -240,7 +241,21 @@ static unsigned SkCopySlot(reshade::api::command_list* cl, int dm, int comp, ID3
     return e.slot;
 }
 
-constexpr unsigned                            kSectionTexRegs = 9;
+static void PublishDrawShaders(reshade::api::command_list* cmd_list, uint64_t vs_hash)
+{
+    if (!g_publish_shader_state) return;
+    uint64_t ps_hash = 0;
+    cmd_list->get_private_data(s_iid_ps_hash, &ps_hash);
+    const uint64_t ps = AliasShaderHash(ps_hash);
+    PortApi::SetBoundShader('v', AliasShaderHash(vs_hash));
+    PortApi::SetBoundShader('p', ps);
+    if (!g_rfx_patch || !ps || PortApi::ShaderRegexLinked(ps) || !PortApi::ShaderRegexGroupLoaded(kRfxNamespace, kRfxRegexGroup)) return;
+    unsigned ps_max = 0;
+    bool     has_glow = false;
+    if (GetRfxPatchVariant(cmd_list->get_device(), CmdGfx(cmd_list).gfx_pso, &ps_max, &has_glow, g_decensor))
+        PortApi::LinkShaderRegexGroup(ps, kRfxNamespace, kRfxRegexGroup);
+}
+
 constexpr uint32_t                            kSectexGap = 30; // frames unseen before a texture's next sighting is logged again
 static std::mutex                             g_sectex_mtx;
 static std::unordered_map<uint64_t, uint32_t> g_sectex_last; // hash | unread << 32 -> last frame a section saw it
@@ -285,6 +300,134 @@ static bool ForEachPsTexture(reshade::api::command_list* cmd_list, bool unread, 
     return true;
 }
 
+void CarryPsReads(const DrawArgs& da)
+{
+    if (!g_ps_slot_queries.load(std::memory_order_relaxed)) return;
+    reshade::api::command_list* const cmd_list = da.cmd_list;
+    CmdState&                         gs = CmdGfx(cmd_list);
+    if (!InSkinBand(gs.vb[0].va)) return;
+    PROF(PROF_DI_PsCarry);
+    const uint64_t layh = CmdGfxLayout(cmd_list);
+    if (!layh) return;
+    PsCarry&       pc = gs.ps_carry;
+    const uint64_t gen = CmdGen(cmd_list);
+    if (pc.layout != layh || pc.layout_gen != gen) {
+        std::lock_guard l(g_layout_regmap_mtx);
+        auto            it = g_layout_regmap.find(layh);
+        if (it == g_layout_regmap.end() || !it->second.built) return;
+        for (unsigned r = 0; r < kSectionTexRegs; ++r) {
+            const RegBind& b = it->second.t_ps[r];
+            pc.param[r] = b.param < 64 && b.is_table ? b.param : 0xFF;
+            pc.offset[r] = b.offset;
+        }
+        pc.layout = layh;
+        pc.layout_gen = gen;
+    }
+    const uint64_t reads = PipelinePsReadMask(gs.gfx_pso);
+    for (unsigned r = 0; r < kSectionTexRegs; ++r)
+        if (((reads >> r) & 1u) && pc.param[r] != 0xFF) pc.slot[r] = PsCarry::Slot{ gs.root[pc.param[r]].table, pc.offset[r], gen };
+}
+
+struct CarryKey {
+    int      dm = 0;
+    int      comp = 0;
+    uint64_t ps = 0;
+    unsigned reg = 0;
+    bool     operator<(const CarryKey& o) const
+    {
+        return std::tie(dm, comp, ps, reg) < std::tie(o.dm, o.comp, o.ps, o.reg);
+    }
+};
+struct CarriedTexture {
+    ID3D12Resource* res = nullptr;
+    uint32_t        hash = 0;
+    unsigned        fmt = 0;
+    uint32_t        frame = 0;
+};
+// What the list carry last published for one component's pass and register, referenced so it outlives the
+// game's release of it.
+class CarryMemo {
+public:
+    void Remember(const CarryKey& k, ID3D12Resource* res, uint32_t hash, unsigned fmt)
+    {
+        std::lock_guard l(m_mtx);
+        Roll();
+        CarriedTexture& e = m_map[k];
+        if (e.res != res) {
+            res->AddRef();
+            if (e.res) e.res->Release();
+            e.res = res;
+        }
+        e.hash = hash;
+        e.fmt = fmt;
+        e.frame = g_frame_id;
+    }
+    // With a reference the caller releases.
+    bool Recall(const CarryKey& k, CarriedTexture& out)
+    {
+        std::lock_guard l(m_mtx);
+        Roll();
+        auto it = m_map.find(k);
+        if (it == m_map.end()) return false;
+        out = it->second;
+        out.res->AddRef();
+        return true;
+    }
+
+private:
+    void Roll()
+    {
+        const unsigned gen = PortApi::LoadGeneration();
+        if (gen == m_gen) return;
+        m_gen = gen;
+        for (auto& kv : m_map) kv.second.res->Release();
+        m_map.clear();
+    }
+    std::mutex                         m_mtx;
+    std::map<CarryKey, CarriedTexture> m_map;
+    unsigned                           m_gen = 0;
+};
+static CarryMemo g_carry_memo;
+
+static uint16_t PublishCarriedTextures(reshade::api::command_list* cmd_list, int dm, int comp, const DxilSrvRegs& ps_regs,
+    uint16_t pushed, uint64_t ps_hash)
+{
+    const PsCarry& pc = CmdGfx(cmd_list).ps_carry;
+    const uint64_t gen = CmdGen(cmd_list);
+    device*        dev = cmd_list->get_device();
+    uint16_t       carried = 0;
+    for (unsigned r = 0; r < kSectionTexRegs; ++r) {
+        if (ps_regs.reads(r) || ((pushed >> r) & 1u)) continue;
+        const CarryKey       key{ dm, comp, ps_hash, r };
+        const PsCarry::Slot& s = pc.slot[r];
+        const TableStart     ts = s.table.handle && s.gen == gen ? TableStartOf(dev, s.table) : TableStart{};
+        ResInfo              ri;
+        const bool           listed = ts && g_heap_to_res.find({ ts.heap, ts.base + s.offset }, ri) && ri.res;
+        CarriedTexture       ct;
+        if (listed) {
+            const uint32_t resident = TexHashOf(reinterpret_cast<uint64_t>(ri.res));
+            const uint32_t hash = !resident || PortApi::TextureHashHasSections(resident) ? resident : TexLodTargetOf(resident);
+            ct.res = ri.res;
+            ct.hash = hash && PortApi::TextureHashHasSections(hash) ? hash : resident;
+            ct.fmt = ri.view_handle ? (unsigned)dev->get_resource_view_desc(resource_view{ ri.view_handle }).format : 0u;
+            g_carry_memo.Remember(key, ct.res, ct.hash, ct.fmt);
+        }
+        const bool recalled = !listed && g_carry_memo.Recall(key, ct);
+        if (listed || recalled) {
+            PortApi::PushGameTexture('p', r, ct.res, ct.hash, ct.fmt);
+            carried |= (uint16_t)(1u << r);
+        }
+        if (recalled) ct.res->Release();
+        const unsigned src = listed ? 1u : recalled ? 2u : 0u;
+        if (g_debug && DiagChanged("SECTEX-CARRY", (int)(((unsigned)CompKey(dm, comp) * 16u + r) ^ (unsigned)(ps_hash * 0x9E3779B97F4A7C15ull >> 40)), (unsigned long long)ct.hash << 32 | ct.fmt << 2 | src))
+            logger::write("SECTEX-CARRY f=%u mod=%d comp=%d ps-t%u ps=%016llx does not read it: %s%u -- %08x fmt=%u",
+                g_frame_id, dm, comp, r, (unsigned long long)ps_hash,
+                listed ? "the list's last character draw that read it, frame " : recalled ? "nothing on this list; remembered from frame " : "nothing on this list, nothing remembered, frame ",
+                recalled ? ct.frame : g_frame_id, ct.hash, ct.fmt);
+    }
+    return carried;
+}
+
 static uint16_t PublishSectionTextures(reshade::api::command_list* cmd_list, int dm, int comp, uint32_t rtv_count)
 {
     const DxilSrvRegs ps_regs = PipelineSrvRegs(CmdGfx(cmd_list).gfx_pso, 'p');
@@ -292,6 +435,8 @@ static uint16_t PublishSectionTextures(reshade::api::command_list* cmd_list, int
     uint64_t          ps_hash = 0;
     cmd_list->get_private_data(s_iid_ps_hash, &ps_hash);
     const uint64_t pass = TexLookPlaceOf(g_geomods[dm].wcl_ns.c_str(), comp, ps_hash);
+    const bool     every_slot = g_geomods[dm].mod.queries_ps_slots;
+    device*        dev = cmd_list->get_device();
     ForEachPsTexture(cmd_list, g_debug, ps_regs, [](unsigned) { return true; }, [&](const PsTexture& t) {
         const unsigned    r = t.reg;
         const bool        read = t.read;
@@ -303,11 +448,16 @@ static uint16_t PublishSectionTextures(reshade::api::command_list* cmd_list, int
         const uint32_t hash = !resident || PortApi::TextureHashHasSections(resident)
             ? resident
             : TexLodTargetOf(resident);
-        if (!hash || !PortApi::TextureHashHasSections(hash)) return;
+        const bool known = hash && PortApi::TextureHashHasSections(hash);
+        if (!known && !(every_slot && read)) return;
         if (read) {
-            PortApi::PushGameTexture('p', r, ri.res, hash);
+            const unsigned fmt = every_slot && ri.view_handle
+                ? (unsigned)dev->get_resource_view_desc(resource_view{ ri.view_handle }).format
+                : 0u;
+            PortApi::PushGameTexture('p', r, ri.res, known ? hash : resident, fmt);
             pushed |= (uint16_t)(1u << r);
         }
+        if (!known) return;
         if (g_debug) {
             bool appeared;
             {
@@ -330,6 +480,7 @@ static uint16_t PublishSectionTextures(reshade::api::command_list* cmd_list, int
             }
         }
     });
+    if (every_slot) pushed |= PublishCarriedTextures(cmd_list, dm, comp, ps_regs, pushed, ps_hash);
     return pushed;
 }
 
@@ -415,7 +566,7 @@ bool DrawComponent(InjectFrame& fr, int dm, const WwmiMod::Component* wc)
         ProfScope           _di_compsetup(PROF_DI_CompSetup);
         ProfScope           _cs_prep(PROF_CS_Prep);
         const std::wstring& uns = g_geomods[dm].wcl_ns;
-        const std::wstring  fq = PortComponentSection(dm, wc->index, uns);
+        const std::wstring  fq = PortComponentSection(dm, wc->index, wc->tail, uns);
 
         if (!fq.empty()) {
             bool      skip_orig = false;
@@ -595,6 +746,7 @@ bool DrawComponent(InjectFrame& fr, int dm, const WwmiMod::Component* wc)
                 {
                     PortApi::PushGameConstantBuffer('v', 4, nullptr, 0, 0);
                     PortApi::PushGameConstantBuffer('v', 3, nullptr, 0, 0);
+                    PortApi::PushGameConstantBuffer('v', 2, nullptr, 0, 0);
                     if (g_push_game_vb)
                         PortApi::PushGameVertexBuffer(0, nullptr, 0, 0, 0, 0);
                 }
@@ -640,6 +792,10 @@ bool DrawComponent(InjectFrame& fr, int dm, const WwmiMod::Component* wc)
                 w3 = kNotSkeletonWidth;
             }
             PortApi::PushGameConstantBuffer('v', 3, port_cb3_res, port_cb3_va, w3);
+            {
+                const RootCbvBind obj = ObjectCbOf(cmd_list);
+                if (obj.res && obj.va) PortApi::PushGameConstantBuffer('v', 2, obj.res, obj.va, kDx11ObjectCbByteWidth);
+            }
 
             if (g_push_game_vb) {
                 uint64_t        gva[8] = {};
@@ -874,8 +1030,9 @@ bool DrawComponent(InjectFrame& fr, int dm, const WwmiMod::Component* wc)
                 g_sections_this_frame.fetch_add(1, std::memory_order_relaxed); // GTEXMISS: sections before a miss
                 std::optional<PortApi::SkelCopyScope> sk_scope;
                 if (sk_copy || sk_first) sk_scope.emplace(uns.c_str(), sk_copy);
+                PublishDrawShaders(cmd_list, vs_hash);
                 ran = PortRunSection(fq, hk, index_count, first_index, first_instance,
-                    skip_orig);
+                    CmdGfx(cmd_list).gfx_pso, skip_orig);
             }
             for (unsigned r = 0; r < kSectionTexRegs; ++r)
                 if (sect_tex & (1u << r)) PortApi::UnpushGameTexture('p', r);

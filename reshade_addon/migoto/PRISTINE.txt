@@ -9,6 +9,7 @@ DirectX11\DrawCallInfo.h
 DirectX11\FrameAnalysis.h
 DirectX11\globals.h
 DirectX11\HackerDXGI.h
+DirectX11\HackerInputLayout.cpp
 DirectX11\HackerInputLayout.h
 DirectX11\HookedContext.h
 DirectX11\HookedDevice.h

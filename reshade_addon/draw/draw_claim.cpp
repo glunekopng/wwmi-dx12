@@ -36,13 +36,21 @@ bool RunDrawShaderOverrides(const DrawArgs& da)
         cmd_list->get_private_data(s_iid_ps_hash, &draw_ps_h);
         t_cur_vs_hash = vs_hash;
         t_cur_ps_hash = draw_ps_h; // for the bare ps/vs filter operand
+        uint64_t draw_gs_h = 0;
+        cmd_list->get_private_data(s_iid_gs_hash, &draw_gs_h);
+        const uint64_t vs_ini = AliasShaderHash(vs_hash);
+        const uint64_t ps_ini = AliasShaderHash(draw_ps_h);
+        const uint64_t gs_ini = AliasShaderHash(draw_gs_h);
+        if (g_publish_shader_state &&
+            (PortApi::ShaderOverrideMatches(vs_ini) || PortApi::ShaderOverrideMatches(ps_ini) || PortApi::ShaderOverrideMatches(gs_ini))) {
+            PortApi::SetBoundShader('v', vs_ini);
+            PortApi::SetBoundShader('p', ps_ini);
+            PortApi::SetBoundShader('g', gs_ini);
+        }
         bool sk = false;
         if (vs_hash) sk |= RunShaderOverrides(vs_hash, &ddi, cmd_list);
         if (draw_ps_h) sk |= RunShaderOverrides(draw_ps_h, &ddi, cmd_list);
-        uint64_t draw_gs_h = 0;
-        cmd_list->get_private_data(s_iid_gs_hash, &draw_gs_h);
         if (draw_gs_h) sk |= RunShaderOverrides(draw_gs_h, &ddi, cmd_list);
-        PortApi::RunPendingPost();
         if (sk) {
             if (g_debug && DiagOnce("SHADEROVR-SKIP", (int)((vs_hash ^ draw_ps_h) ^ ((vs_hash ^ draw_ps_h) >> 32)))) {
                 logger::write("SHADEROVR-SKIP vs=%016llx ps=%016llx (ini handling=skip)", vs_hash, draw_ps_h);
@@ -87,7 +95,7 @@ static int PickSharedRangeSlot(command_list* cmd_list, uint32_t first_index, uin
         const int                 md = g_merged_comps[s].mod_id;
         const WwmiMod::Component* wc = WmodComp(md, g_merged_comps[s].comp_idx);
         if (!wc || !wc->ib_hash) continue;
-        const uint32_t max_end = ModIndexEnd(md);
+        const uint32_t max_end = ModIndexEnd(md, wc->ib_hash);
         if (max_end && IbHash::Lookup(ibr, iboff, max_end * idxb, idxb, vbr, vboff, vstride) == wc->ib_hash) {
             if (g_debug && DiagChanged("SHAREDRANGE", (int)(first_index ^ index_count), (unsigned long long)s))
                 logger::write("SHAREDRANGE first=%u count=%u: %zu mods declare this range; the index buffer names mod %d comp %d",
@@ -314,7 +322,7 @@ std::optional<bool> ClaimDraw(const DrawArgs& da, BoneRoots& roots, DrawClaim& d
                 has_ib_ref = (wc2 && wc2->ib_hash);
                 if (has_ib_ref) {
                     ib_expect = wc2->ib_hash;
-                    const uint32_t  max_end = ModIndexEnd(md);
+                    const uint32_t  max_end = ModIndexEnd(md, wc2->ib_hash);
                     ID3D12Resource* ibr = nullptr;
                     ID3D12Resource* vbr = nullptr;
                     uint64_t        ibva = 0;

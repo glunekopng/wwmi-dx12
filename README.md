@@ -7,7 +7,7 @@ engine with the game in **DirectX 12**, on the WWMI folder and mods you already 
 
 ## Disclaimers
 
-- **Beta** - First public release. Expect rough edges and please report them.
+- **Beta** - Expect rough edges and please report them.
 - **Honesty** - An 8-month, hand-shoveled AI slop project. Tested only on a 12th-gen Intel CPU with an
   NVIDIA RTX 40-series GPU; yours is the next test.
 - **Paranoia** - Not code-signed, so a picky antivirus may complain. The source is on GitHub.
@@ -26,6 +26,8 @@ engine with the game in **DirectX 12**, on the WWMI folder and mods you already 
 - **Shape keys**
 - **RabbitFX**
 - **Decensor**
+- **Hide UID** - your player number hidden at the bottom right, in the Esc menu and in the Friends list
+  (window option, off by default)
 - **Frame generation** - modded characters and generated frames together
 - **Mod logic** - hosts the XXMI fork of 3dmigoto: a mod's ini logic, toggles and keys run as written
 - **Same WWMI, same mods** - your WWMI and `Mods` folders as they are, nested folders included, nothing
@@ -34,6 +36,7 @@ engine with the game in **DirectX 12**, on the WWMI folder and mods you already 
 - **DirectX 11 untouched** - XXMI works as before; the add-on sleeps whenever the game runs DX11
 - **Other ReShade add-ons** - may work alongside; RenoDX is confirmed
 - **One-click launcher** and a **one-checkbox debug log** for bug reports
+- **Performance report** - what the add-on costs, live or as a 10-second report to send with a slowdown
 - **Stops instead of freezing** - if the add-on hits an error, it switches itself off until the game
   restarts and says so, instead of taking the game down
 
@@ -60,7 +63,7 @@ engine with the game in **DirectX 12**, on the WWMI folder and mods you already 
    folder with `d3dx.ini`, `Core\WWMI\`, `Mods\`), and check your mods in DX11.
 2. Recommended: start the game once in DirectX 12 through the official launcher, without ReShade, so it
    compiles its shaders.
-3. Install [ReShade](https://reshade.me) **with full add-on support** (the standard build does not load add-ons) for
+3. Install [ReShade](https://reshade.me) 6.8.0 or newer **with full add-on support** (the standard build does not load add-ons) for
    `Client-Win64-Shipping.exe`, DirectX 10/11/12. It stays as `dxgi.dll`; XXMI runs fine with it.
 4. Unzip the [latest release](https://github.com/lekarsenten/wwmi-dx12/releases/latest) into `<Win64>`.
    With `[ADDON] AddonPath` set in `ReShade.ini`, `wwmi_dx12.addon64` must be in that folder: the launcher
@@ -68,6 +71,8 @@ engine with the game in **DirectX 12**, on the WWMI folder and mods you already 
 5. Start the game in DirectX 12, either way:
    - **Easy:** double-click `wwmi_dx12_launch.bat`. It finds your WWMI folder (or asks), saves it in
      `wwmi_dx12.ini`, writes the settings mods need into `Engine.ini` and `UserEngine.ini` and starts DX12.
+     It shows the add-on and ReShade versions and both folders first; the arrow keys pick the graphics
+     files (UHD, HD, SD), any other key starts the game.
    - **By hand:** set `wwmi_dir` in `wwmi_dx12.ini` once, choose DirectX 12 in the game's settings and
      start the game as usual. XXMI Launcher already writes these lines when it starts WWMI; if mod
      textures, or whole characters at a distance, stay vanilla, add them (see What it changes) or run the
@@ -103,11 +108,15 @@ with a `wwmi-dx12` window showing "Active mods" above 0.
 | Disable addon (F6) | all mod work off, to compare |
 | Debug log / level | writes `<Win64>\wwmi_dx12_addon.log`; off by default, saved to `wwmi_dx12.ini` |
 | Decensor | saved to `wwmi_dx12.ini` |
+| Hide UID | hides your player number (bottom right, Esc menu, Friends list); off by default, saved to `wwmi_dx12.ini` |
 | Load mod textures in the background | on (default): no stutter, textures pop in a moment later. Off: textures from the first frame, after a short pause |
 | Use look-alike texture matches | on by default (see Texture matches); saved to `wwmi_dx12.ini` |
 | Use texture match cache | on by default; off: no texture matches are learned, read or saved (see Texture matches) |
+| Mod buffers in video memory | on by default (faster); saved to `wwmi_dx12.ini` |
 | Reload mods | re-reads every mod ini (untested) |
 | Clear caches at next launch | rebuilds saved shader patches and texture matches; try it if mods look wrong after an update |
+| Performance monitor | what the add-on costs in processor and graphics card time, live |
+| Save a 10-second performance report | writes `<Win64>\wwmi_dx12_perf_<date>_<time>.txt`; send it with a slowdown report |
 
 ## Texture matches
 
@@ -147,8 +156,6 @@ brings seeds of what was already learned (`wwmi_dx12\cache\seed-<version>.lodcac
 - **Ray tracing**, next.
 - **Performance** - less CPU work per modded draw, and video-memory management so mod buffers and
   textures stay resident without pushing the game's own data out.
-- **Performance-tracking builds** - a build with the profiler included, so a frame-cost report can be sent
-  from your own setup along with the logs.
 - **Easier setup** - a streamlined install and a better launcher.
 - **Shared texture matches** - an automatically updated seed of learned texture matches, so mods look
   right on first launch. Sharing a file by hand works already (see Texture matches).
@@ -159,7 +166,9 @@ brings seeds of what was already learned (`wwmi_dx12\cache\seed-<version>.lodcac
 1. Tick **Debug log** (or set `debug = 1` in `wwmi_dx12.ini` to log from the start).
 2. Make the problem happen, close the game, copy `<Win64>\wwmi_dx12_addon.log` (and
    `wwmi_dx12_crash.log`) **before the next launch**, which starts a new log.
-3. Send them with what went wrong, which mods were on screen, whether they work in DX11, and your GPU:
+3. For a slowdown, also save a performance report where it happens (**Save a 10-second performance
+   report**) and send the `wwmi_dx12_perf_*.txt` file with the logs.
+4. Send them with what went wrong, which mods were on screen, whether they work in DX11, and your GPU:
    a [GitHub issue](https://github.com/lekarsenten/wwmi-dx12/issues), or a DM or comment on the mod's
    GameBanana page. The log names folders on your PC.
 
@@ -196,7 +205,7 @@ copy them there from `third_party\dxc\bin\x64` (a
   [WWMI Tools](https://github.com/SpectrumQT/WWMI-Tools)
 - [WuWa mods on GameBanana](https://gamebanana.com/games/20357) · [Discord](https://discord.com/invite/agmg)
 
-## Credits
+## Built on
 
 The work wwmi-dx12 is built from and runs:
 

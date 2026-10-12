@@ -114,6 +114,7 @@ void LoadGeometryMods()
                 }
                 if (gm.mod.dir.empty()) gm.mod.dir = dm.dir; // only if their SectionFolder had none
                 WwmiMod::LoadResources(gm.mod, g_d3d12_device);
+                if (gm.mod.queries_ps_slots) g_ps_slot_queries.store(true, std::memory_order_relaxed);
                 if (!gm.mod.forward_map_file.empty()) {
                     std::wstring rel = gm.mod.forward_map_file;
                     for (auto& c : rel)
@@ -155,28 +156,31 @@ void LoadGeometryMods()
             for (size_t i = 0; i < g_geomods.size(); ++i) {
                 const auto& gm = g_geomods[i];
                 if (gm.mod.comps.empty()) continue;
-                const std::wstring fq = PortComponentSection((int)i, gm.mod.comps.front().index, gm.wcl_ns);
+                const WwmiMod::Component& c0 = gm.mod.comps.front();
+                const std::wstring        fq = PortComponentSection((int)i, c0.index, c0.tail, gm.wcl_ns);
                 if (!fq.empty()) {
                     ++reachable;
                     continue;
                 }
                 ++inert;
-                logger::write("PORT-NS INERT mod %zu ns='%ls' -- their engine has no [TextureOverride...Component%d] "
+                logger::write("PORT-NS INERT mod %zu ns='%ls' -- their engine has no [TextureOverride...%ls] "
                               "under that namespace, so this mod will never run a section",
-                    i, gm.wcl_ns.c_str(), gm.mod.comps.front().index);
+                    i, gm.wcl_ns.c_str(), c0.tail.c_str());
             }
             logger::write("PORT-NS audit: %d of %zu geometry mods can resolve their own component sections%s",
                 reachable, g_geomods.size(),
                 inert ? "  *** SOME ARE INERT, see above ***" : "");
         }
         g_ibhash_slot.clear();
-        g_mod_index_end.assign(g_geomods.size(), 0u);
+        g_mod_index_end.assign(g_geomods.size(), {});
         for (size_t i = 0; i < g_merged_comps.size(); ++i) {
-            const MergedComp& mc = g_merged_comps[i];
-            if (const WwmiMod::Component* wc = WmodComp(mc.mod_id, mc.comp_idx); wc && wc->ib_hash)
-                g_ibhash_slot.emplace(wc->ib_hash, (int)i);
-            if (mc.mod_id >= 0 && mc.mod_id < (int)g_mod_index_end.size())
-                g_mod_index_end[mc.mod_id] = (std::max)(g_mod_index_end[mc.mod_id], mc.first_index + mc.match_count);
+            const MergedComp&         mc = g_merged_comps[i];
+            const WwmiMod::Component* wc = WmodComp(mc.mod_id, mc.comp_idx);
+            if (wc && wc->ib_hash) g_ibhash_slot.emplace(wc->ib_hash, (int)i);
+            if (mc.mod_id >= 0 && mc.mod_id < (int)g_mod_index_end.size()) {
+                uint32_t& end = g_mod_index_end[mc.mod_id][wc ? wc->ib_hash : 0u];
+                end = (std::max)(end, mc.first_index + mc.match_count);
+            }
         }
         for (MergedComp& mc : g_merged_comps) mc.with.clear();
         for (const auto& kv : g_first_to_shared) {

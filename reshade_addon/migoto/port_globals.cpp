@@ -196,9 +196,62 @@ ShaderRegexPattern::~ShaderRegexPattern()
 
 bool ShaderRegexPattern::compile(std::string*)
 {
-    LogOverlay(LOG_NOTICE, "[ShaderRegex] is not supported on DX12: shader assembly cannot be "
-                           "rewritten because DXIL is signed bitcode. Section ignored.\n");
-    return false;
+    LogOverlay(LOG_NOTICE, "[ShaderRegex] patterns are not applied on DX12: shader assembly cannot be rewritten "
+                           "because DXIL is signed bitcode. The section's filter_index and command lists are kept "
+                           "for the shaders the add-on patches itself.\n");
+    return true;
+}
+
+// PORTED from ShaderRegex.cpp ShaderRegexGroup::link_command_lists_and_filter_index :366-426.
+void ShaderRegexGroup::link_command_lists_and_filter_index(UINT64 shader_hash)
+{
+    ShaderOverride*                         shader_override = NULL;
+    std::wstring                            match_section;
+    std::wstring                            ini_line;
+    CommandList::Commands::reverse_iterator i;
+
+    if (command_list.noop() && post_command_list.noop() && filter_index == FLT_MAX)
+        return;
+
+    shader_override = &G->mShaderOverrideMap[shader_hash];
+
+    if (shader_override->command_list.ini_section.empty()) {
+        match_section = command_list.ini_section + L".Match";
+        shader_override->command_list.ini_section = match_section;
+        shader_override->post_command_list.ini_section = match_section;
+        shader_override->post_command_list.post = true;
+    }
+
+    if (shader_override->filter_index == FLT_MAX)
+        shader_override->filter_index = filter_index;
+
+    if (link) {
+        for (i = shader_override->command_list.commands.rbegin();
+             i != shader_override->command_list.commands.rend(); i++) {
+            if (*i == link)
+                return;
+        }
+        shader_override->command_list.commands.push_back(link);
+        if (post_link)
+            shader_override->post_command_list.commands.push_back(post_link);
+        return;
+    } else if (post_link) {
+        for (i = shader_override->post_command_list.commands.rbegin();
+             i != shader_override->post_command_list.commands.rend(); i++) {
+            if (*i == post_link)
+                return;
+        }
+        shader_override->post_command_list.commands.push_back(post_link);
+        return;
+    }
+
+    ini_line = L"[" + command_list.ini_section + L".Match] run = linked command list";
+
+    if (!command_list.noop())
+        link = LinkCommandLists(&shader_override->command_list, &command_list, &ini_line);
+
+    if (!post_command_list.noop())
+        post_link = LinkCommandLists(&shader_override->post_command_list, &post_command_list, &ini_line);
 }
 
 bool ShaderRegexPattern::named_group_overlaps(ShaderRegexTemps&)

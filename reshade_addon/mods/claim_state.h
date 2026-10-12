@@ -13,6 +13,7 @@
 #include "../instrumentation/diag.h" // g_frame_id -- ModClaimAge
 
 // ---- the loaded geometry mods (filled once by the mod discovery in on_present) ------------------
+inline std::atomic<bool>                     g_ps_slot_queries{ false }; // a loaded mod asks what the game bound in ps-tN
 extern std::deque<GeoMod>                    g_geomods;   // deque: a unit never moves (comps are pointed into)
 extern std::unordered_map<std::wstring, int> g_ns_to_mod; // their namespace (GeoMod::wcl_ns) -> geomod index
 extern bool                                  g_geom_loaded;
@@ -24,11 +25,13 @@ inline const WwmiMod::Component* WmodComp(int mod_id, int idx)
         if (c.index == idx) return &c;
     return nullptr;
 }
-inline std::unordered_map<uint32_t, int> g_ibhash_slot;
-inline std::vector<uint32_t>             g_mod_index_end;
-inline uint32_t                          ModIndexEnd(int md)
+inline std::unordered_map<uint32_t, int>                    g_ibhash_slot;
+inline std::vector<std::unordered_map<uint32_t, uint32_t>> g_mod_index_end;
+inline uint32_t                                             ModIndexEnd(int md, uint32_t ib_hash)
 {
-    return (md >= 0 && md < (int)g_mod_index_end.size()) ? g_mod_index_end[md] : 0u;
+    if (md < 0 || md >= (int)g_mod_index_end.size()) return 0u;
+    const auto it = g_mod_index_end[md].find(ib_hash);
+    return it == g_mod_index_end[md].end() ? 0u : it->second;
 }
 // WWMI enable-flag compliance: is this mod's geometry meant to be applied right now?
 bool            ModGeomEnabled(int md);

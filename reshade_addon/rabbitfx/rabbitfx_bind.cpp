@@ -185,12 +185,14 @@ const std::vector<RfxDumpBind>*              RfxBindsForDump(unsigned draw_index
     return (draw_index == t_dump_draw && !t_dump_binds.empty()) ? &t_dump_binds : nullptr;
 }
 
-static thread_local ShadowSlotOvr t_extra[8];
-static thread_local unsigned      t_extra_n = 0;
-void                              SetShadowExtraSlots(const ShadowSlotOvr* s, unsigned n)
+static thread_local std::vector<ShadowSlotOvr> t_extra;
+void                                           SetShadowExtraSlots(const ShadowSlotOvr* s, unsigned n)
 {
-    t_extra_n = (s && n <= 8) ? n : 0;
-    for (unsigned i = 0; i < t_extra_n; ++i) t_extra[i] = s[i];
+    t_extra.assign(s, s ? s + n : s);
+}
+void AddShadowExtraSlots(const ShadowSlotOvr* s, unsigned n)
+{
+    if (s) t_extra.insert(t_extra.end(), s, s + n);
 }
 
 static RfxBindState BindThroughShadow(reshade::api::command_list* cmd_list, ID3D12GraphicsCommandList* cl, const Param0Window& w,
@@ -205,6 +207,8 @@ static RfxBindState BindThroughShadow(reshade::api::command_list* cmd_list, ID3D
     uint32_t maxwi = 0;
     for (const auto& b : binds)
         if (b.reg >= (int)w.srv_basereg) maxwi = std::max<uint32_t>(maxwi, (uint32_t)b.reg - w.srv_basereg);
+    for (const ShadowSlotOvr& e : t_extra)
+        if (e.param == w.srv_param) maxwi = std::max<uint32_t>(maxwi, e.offset);
     uint32_t win = w.srv_count ? w.srv_count : (maxwi + 1);
     if (win < maxwi + 1) win = maxwi + 1;
     if (win == 0 || win > 128) return st; // not the small param0 table -> bail (avoid bindless mirror)
@@ -256,9 +260,8 @@ static RfxBindState BindThroughShadow(reshade::api::command_list* cmd_list, ID3D
         D3D12_CPU_DESCRIPTOR_HANDLE dd = { sh_cpu0 + (SIZE_T)(cur0 + wi) * g_shadow_srv_inc };
         g_d3d12_device->CopyDescriptorsSimple(1, dd, b.srv, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     }
-    for (unsigned i = 0; i < t_extra_n; ++i) {
-        const ShadowSlotOvr& e = t_extra[i];
-        bool                 put = false;
+    for (const ShadowSlotOvr& e : t_extra) {
+        bool put = false;
         for (unsigned k = 0; k < nm && !put; ++k)
             if (mir[k].param == e.param && e.offset < mir[k].count) {
                 g_d3d12_device->CopyDescriptorsSimple(1, { sh_cpu0 + (SIZE_T)(mir[k].cur + e.offset) * g_shadow_srv_inc },
@@ -300,7 +303,7 @@ RfxBindState ApplyDrawBindings(reshade::api::command_list* cmd_list, ID3D12Graph
     const std::vector<WclSlotOvr>& binds, bool guard_bindless)
 {
     RfxBindState st{};
-    if (binds.empty() || !cmd_list || !cl || !g_d3d12_device) return st;
+    if ((binds.empty() && t_extra.empty()) || !cmd_list || !cl || !g_d3d12_device) return st;
     Param0Window w;
     if (!ResolveParam0Window(cmd_list, w)) return st;
     if (guard_bindless && w.n_srv > 1) return st; // bindless pass -> BAIL (a shadow swap would unbind it)

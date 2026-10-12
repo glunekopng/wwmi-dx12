@@ -1,5 +1,6 @@
 #include "dx12_input_layout.h"
 #include "dx12_wrap.h"
+#include "HackerInputLayout.h"
 #include <wrl/client.h> // Microsoft::WRL::ComPtr, for the layout blob
 
 EXTERN_C const GUID InputLayoutDescGuid;
@@ -10,6 +11,7 @@ EXTERN_C const GUID InputLayoutDescGuid;
 #include <string>
 #include <vector>
 #include <cstdio> // _snprintf_s for DescribeInputLayout (X20)
+#include <cstddef>
 
 namespace MigotoPort {
 
@@ -69,11 +71,33 @@ public:
     HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID, UINT, const void*) override { return S_OK; }
     HRESULT STDMETHODCALLTYPE SetPrivateDataInterface(REFGUID, const IUnknown*) override { return S_OK; }
 
+    void Seal()
+    {
+        const SIZE_T bytes = elems.size() * sizeof(D3D11_INPUT_ELEMENT_DESC);
+        if (SUCCEEDED(D3DCreateBlob(bytes, &blob)) && blob)
+            memcpy(blob->GetBufferPointer(), elems.data(), bytes);
+    }
+
 private:
     LONG rc_ = 1;
 };
 
-std::unordered_map<unsigned long long, LayoutStandIn*> g_layouts;
+struct PipelineLayout {
+    LayoutStandIn*     layout = nullptr;
+    HackerInputLayout* hacker = nullptr;
+
+    void Release()
+    {
+        if (hacker) hacker->Release();
+        if (layout) layout->Release();
+    }
+};
+
+static_assert(sizeof(D3D11_INPUT_ELEMENT_DESC) == offsetof(D3D11_INPUT_ELEMENT_DESC, InstanceDataStepRate) + sizeof(UINT),
+    "the custom layout key copies the fields after SemanticName as bytes");
+
+std::unordered_map<unsigned long long, PipelineLayout> g_layouts;
+std::unordered_map<std::string, HackerInputLayout*>    g_custom_layouts;
 std::unordered_set<std::string>                        g_semantics;
 std::mutex                                             g_layout_mtx;
 LayoutStandIn*                                         g_current = nullptr;
@@ -99,23 +123,21 @@ void RecordInputLayout(unsigned long long pso, const InputElement* in, unsigned 
         d.InstanceDataStepRate = in[i].instance_step_rate;
         L->elems.push_back(d);
     }
-    const SIZE_T bytes = L->elems.size() * sizeof(D3D11_INPUT_ELEMENT_DESC);
-    if (SUCCEEDED(D3DCreateBlob(bytes, &L->blob)) && L->blob)
-        memcpy(L->blob->GetBufferPointer(), L->elems.data(), bytes);
+    L->Seal();
 
     auto it = g_layouts.find(pso);
     if (it != g_layouts.end()) { // PSO handles are reused after destruction
-        if (g_current == it->second) g_current = nullptr;
-        it->second->Release();
+        if (g_current == it->second.layout) g_current = nullptr;
+        it->second.Release();
     }
-    g_layouts[pso] = L;
+    g_layouts[pso] = { L, nullptr };
 }
 
 void SetCurrentInputLayout(unsigned long long pso)
 {
     std::lock_guard<std::mutex> l(g_layout_mtx);
     auto                        it = g_layouts.find(pso);
-    g_current = (it != g_layouts.end()) ? it->second : nullptr;
+    g_current = (it != g_layouts.end()) ? it->second.layout : nullptr;
 }
 
 ::ID3D11InputLayout* CurrentInputLayout()
@@ -132,8 +154,8 @@ unsigned DescribeInputLayout(unsigned long long pso, char* buf, unsigned n)
     buf[0] = 0;
     std::lock_guard<std::mutex> l(g_layout_mtx);
     auto                        it = g_layouts.find(pso);
-    if (it == g_layouts.end() || !it->second) return 0;
-    const auto& el = it->second->elems;
+    if (it == g_layouts.end() || !it->second.layout) return 0;
+    const auto& el = it->second.layout->elems;
     unsigned    off = 0;
     for (size_t i = 0; i < el.size() && off + 64 < n; ++i) {
         const int w = _snprintf_s(buf + off, n - off, _TRUNCATE, "%s%s%u@s%u+%u:f%u%s",
@@ -145,6 +167,45 @@ unsigned DescribeInputLayout(unsigned long long pso, char* buf, unsigned n)
         off += (unsigned)w;
     }
     return (unsigned)el.size();
+}
+
+HackerInputLayout* HackerInputLayoutOf(unsigned long long pso)
+{
+    std::lock_guard<std::mutex> l(g_layout_mtx);
+    auto                        it = g_layouts.find(pso);
+    if (!pso || it == g_layouts.end() || !it->second.layout || it->second.layout->elems.empty()) return nullptr;
+    PipelineLayout& P = it->second;
+    if (!P.hacker) {
+        P.layout->AddRef();
+        P.hacker = new HackerInputLayout(P.layout, P.layout->elems.data(), (UINT)P.layout->elems.size(), nullptr, 0);
+    }
+    P.hacker->AddRef();
+    return P.hacker;
+}
+
+HackerInputLayout* NewHackerInputLayout(const D3D11_INPUT_ELEMENT_DESC* elements, unsigned count)
+{
+    if (!elements || !count) return nullptr;
+    thread_local std::string key;
+    key.clear();
+    for (unsigned i = 0; i < count; ++i) {
+        const D3D11_INPUT_ELEMENT_DESC& d = elements[i];
+        key += d.SemanticName ? d.SemanticName : "";
+        key += '\0';
+        key.append(reinterpret_cast<const char*>(&d.SemanticIndex), sizeof(d) - offsetof(D3D11_INPUT_ELEMENT_DESC, SemanticIndex));
+    }
+    std::lock_guard<std::mutex> l(g_layout_mtx);
+    HackerInputLayout*&         H = g_custom_layouts[key];
+    if (!H) {
+        auto* L = new LayoutStandIn();
+        L->elems.assign(elements, elements + count);
+        for (D3D11_INPUT_ELEMENT_DESC& d : L->elems)
+            d.SemanticName = g_semantics.emplace(d.SemanticName ? d.SemanticName : "").first->c_str();
+        L->Seal();
+        H = new HackerInputLayout(L, elements, count, nullptr, 0);
+    }
+    H->AddRef();
+    return H;
 }
 
 } // namespace MigotoPort

@@ -14,7 +14,7 @@
 #include "dx12_wrap.h"
 #include "dx12_pipeline.h"
 #include "port_toggles.h" // g_buffers_in_vram
-#include "prof_core.h" // ProfGpuWork -- views created, for the dump's RECORDED ON D3D12 rows
+#include "prof_core.h" // ProfGpuWork -- views created, for the performance report's work rows
 #include "../../src/log.h"
 #include "../../src/d3d12_buffer.h"
 #include "../../src/dxgi_bc.h"

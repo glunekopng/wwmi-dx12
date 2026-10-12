@@ -10,8 +10,11 @@
 #include "../../src/log.h"
 
 #include <string>
+#include <unordered_map>
 
 namespace PortApi {
+
+static std::unordered_map<const CustomResource*, unsigned> g_deferred_pending; // under the engine lock: -> the load it was deferred in
 
 void ForEachVariable(void (*cb)(const wchar_t* fq_name, float value, bool persist, void* user), void* user)
 {
@@ -244,7 +247,30 @@ void BeginDeferredTextures(const wchar_t* ns, std::vector<DeferredTexture>& out)
             r.misc_flags = (D3D11_RESOURCE_MISC_FLAG)r.override_misc_flags;
         out.push_back({ kv.first, fn, (unsigned)r.bind_flags, (unsigned)r.misc_flags,
             r.override_color_space == CustomColorSpace::SRGB });
+        g_deferred_pending[&r] = g_generation;
     }
+}
+
+void LoadDeferredNow(CustomResource* r)
+{
+    if (!r || r->resource || r->view) return;
+    std::lock_guard<std::recursive_mutex> engine_lk(EngineLock());
+    auto                                  it = g_deferred_pending.find(r);
+    if (it == g_deferred_pending.end()) return;
+    const bool this_load = it->second == g_generation;
+    g_deferred_pending.erase(it);
+    if (!g_loaded || !this_load || r->resource || r->view) return;
+    ID3D11Resource* res = LoadDeferredTexture({ std::wstring(), r->filename, (unsigned)r->bind_flags, (unsigned)r->misc_flags,
+        r->override_color_space == CustomColorSpace::SRGB });
+    if (!res) return;
+    r->resource = res;
+    r->device = g_dev.GetPassThroughOrigDevice1();
+    r->is_null = false;
+    MigotoPort::BumpSelectionInputs();
+    const auto& names = CustomResourceNameIndex();
+    const auto  n = names.find(r);
+    logger::write("TEXEAGER-NOW %ls: a copy or a compute bind read it before the background load had -- loaded now, as on DX11",
+        n != names.end() ? n->second.c_str() : r->filename.c_str());
 }
 
 ID3D11Resource* LoadDeferredTexture(const DeferredTexture& t)
@@ -268,6 +294,7 @@ bool PublishDeferredTexture(const wchar_t* fq_name, ID3D11Resource* res)
     r.resource = res;
     r.device = g_dev.GetPassThroughOrigDevice1();
     r.is_null = false; // LoadFromFile's outcome
+    g_deferred_pending.erase(&r);
     MigotoPort::BumpSelectionInputs();
     return true;
 }

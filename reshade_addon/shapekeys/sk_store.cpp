@@ -1,6 +1,6 @@
 // The per-instance store: what a shapekey dispatch publishes for its instance's draw. See sk_internal.h.
 #include "sk_internal.h"
-#include "../instrumentation/profiler.h" // ProfGpuWork -- this file's GPU copies, for the dump's RECORDED ON D3D12 rows
+#include "../instrumentation/profiler.h" // ProfGpuWork -- this file's GPU copies, for the performance report's work rows
 #include "../instrumentation/removal_pin.h"
 #include "../migoto/dx12_bridge.h"
 #include "../../src/gpu_progress.h"

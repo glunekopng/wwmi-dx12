@@ -4,7 +4,9 @@
 #include "../instrumentation/removal_pin.h"
 #include "../migoto/dx12_bridge.h"
 #include "../instrumentation/diag.h"
+#include "../instrumentation/hot_path.h"
 #include "pipeline_hooks.h" // the PSO -> shader-hash table on_bind_pipeline stamps from
+#include "../hud/uid_hide.h"
 
 void on_bind_pipeline(command_list* cmd_list, pipeline_stage type, pipeline pipeline)
 {
@@ -19,11 +21,14 @@ void on_bind_pipeline(command_list* cmd_list, pipeline_stage type, pipeline pipe
         auto& st = CmdGfx(cmd_list);
         st.gfx_pso = pipeline.handle;
         st.gfx_set = 0;
-        if (g_decensor && ps && !g_addon_disabled)
-            if (const uint64_t v = PsoDecensorVariant(cmd_list->get_device(), pipeline.handle)) {
+        if (ps && !g_addon_disabled) {
+            uint64_t v = g_hide_uid ? PsoUidVariant(cmd_list->get_device(), pipeline.handle, g_uid_hide.Target()) : 0;
+            if (!v && g_decensor) v = PsoDecensorVariant(cmd_list->get_device(), pipeline.handle);
+            if (v) {
                 reinterpret_cast<ID3D12GraphicsCommandList*>(cmd_list->get_native())->SetPipelineState(reinterpret_cast<ID3D12PipelineState*>(v));
                 st.gfx_set = v;
             }
+        }
     }
     if ((uint32_t)(type & pipeline_stage::compute_shader) != 0) {
         cmd_list->set_private_data(s_iid_cs_hash, vc);

@@ -3,6 +3,7 @@
 // ===========================================================================
 #include "port_keygate.h"
 #include "port_api.h"
+#include "port_api_internal.h" // LoadDeferredNow
 #include "prof_core.h"
 #include "CommandList.h" // the parsed command types the typed observer reads (theirs, unmodified)
 #include "input.h"
@@ -302,7 +303,6 @@ public:
     void UpEvent(HackerDevice* device) override { inner_->UpEvent(device); }
 };
 
-#ifdef WWMI_DEBUG
 struct CmdCost {
     std::atomic<uint64_t> calls{ 0 };
     std::atomic<uint64_t> incl{ 0 };
@@ -392,7 +392,6 @@ void CostEnd(CmdCost& c, int64_t t0, uint64_t saved)
     c.self.fetch_add(self, std::memory_order_relaxed);
     t_cmd_child = saved + el;
 }
-#endif
 
 class ObservedCommand : public CommandListCommand {
 public:
@@ -405,19 +404,16 @@ public:
     bool                                sel_watched = false;
     unsigned                            sel_watch_gen = 0;
     CustomResource*                     sel_res = nullptr;
+    CustomResource*                     file_src = nullptr; // a file texture this copies somewhere a draw does not sample it
     bool                                is_if = false;
     bool                                is_run = false;
-#ifdef WWMI_DEBUG
     CmdCost* cost = nullptr;
-#endif
     explicit ObservedCommand(std::shared_ptr<CommandListCommand> c)
         : inner(std::move(c))
     {
         ini_line = inner->ini_line;
         CommandListCommand* ic = inner.get();
-#ifdef WWMI_DEBUG
         cost = CostKind(ic);
-#endif
         is_if = dynamic_cast<IfCommand*>(ic) != nullptr;
         is_run = dynamic_cast<RunExplicitCommandList*>(ic) != nullptr;
         if (VariableAssignment* va = dynamic_cast<VariableAssignment*>(ic)) {
@@ -438,6 +434,12 @@ public:
                 rc->src.custom_resource_pool;
             if (!sel_always && rc->dst.type == ResourceCopyTargetType::CUSTOM_RESOURCE && !rc->dst.pool_dynamic_index_expression)
                 sel_res = const_cast<ResourceCopyTarget&>(rc->dst).GetCustomResource(nullptr);
+            const bool draw_slot = (rc->dst.type == ResourceCopyTargetType::SHADER_RESOURCE && rc->dst.shader_type != L'c') ||
+                rc->dst.type == ResourceCopyTargetType::THIS_RESOURCE;
+            if (!draw_slot && rc->src.type == ResourceCopyTargetType::CUSTOM_RESOURCE && !rc->src.custom_resource_pool) {
+                CustomResource* src = const_cast<ResourceCopyTarget&>(rc->src).GetCustomResource(nullptr);
+                if (src && !src->filename.empty()) file_src = src;
+            }
         }
         relevant = ClassifyCommand(inner.get(), nullptr, cached);
         cached_ok = relevant && StaticTargets(inner.get());
@@ -450,7 +452,6 @@ public:
     }
     void run(CommandListState* state) override
     {
-#ifdef WWMI_DEBUG
         const bool timed = g_prof_enabled;
         uint64_t   saved = 0;
         int64_t    t0 = 0;
@@ -459,7 +460,6 @@ public:
             t_cmd_child = 0;
             t0 = prof_qpc_now();
         }
-#endif
         if (g_observer) g_observer(ini_line.c_str(), g_observer_user);
         if (g_typed && relevant) {
             if (cached_ok) {
@@ -483,6 +483,7 @@ public:
             trace->push_back(this);
             t_trace = nullptr;
         }
+        if (file_src) PortApi::LoadDeferredNow(file_src);
         if (!is_run || !g_run_explicit_hook || !g_run_explicit_hook(inner.get(), state)) inner->run(state);
         if (trace) t_trace = trace;
         t_cur_ini_line = outer;
@@ -503,9 +504,7 @@ public:
                 if (sel_watched) BumpSelectionInputs();
             }
         }
-#ifdef WWMI_DEBUG
         if (timed) CostEnd(*cost, t0, saved);
-#endif
     }
     bool optimise(HackerDevice* device) override { return inner->optimise(device); }
     bool noop(bool post, bool ignore_cto_pre, bool ignore_cto_post) override
@@ -593,7 +592,6 @@ size_t OverrideNamespaceCount()
 
 namespace PortApi {
 
-#ifdef WWMI_DEBUG
 void CommandCostMark()
 {
     std::lock_guard<std::mutex> l(MigotoPort::CostMtx());
@@ -644,6 +642,5 @@ void CommandCostReport(FILE* f, int frames)
         std::fprintf(f, "  %-44s %9.1f %10.3f %12.2f %10.3f\n", r.name.c_str(), r.calls * inv, r.self * ms * inv,
             r.self * ms * 1000.0 / (double)r.calls, r.incl * ms * inv);
 }
-#endif
 
 } // namespace PortApi

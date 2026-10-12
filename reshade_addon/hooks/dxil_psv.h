@@ -1,6 +1,8 @@
 #pragma once
 #include <cstdint>
 #include <cstddef>
+#include <string>
+#include <vector>
 
 struct DxilSrvRegs {
     uint64_t lo = 0; // t0..t63 / t64..t127 bound in space 0 (SRV of any kind)
@@ -14,3 +16,17 @@ struct DxilSrvRegs {
 };
 
 bool DxilShaderSrvRegs(const void* code, size_t size, DxilSrvRegs& out);
+
+// What a shader's container says about its interface: the PSV0 resource records by class, and the
+// ISG1 / OSG1 signature elements as "<semantic><index>" ("TEXCOORD10", "SV_Position0").
+struct DxilShape {
+    unsigned                 samplers = 0;
+    unsigned                 cbuffers = 0;
+    unsigned                 typed_srvs = 0;
+    unsigned                 other_resources = 0; // raw / structured SRVs and every UAV
+    std::vector<std::string> inputs;
+    std::vector<std::string> outputs;
+};
+
+// False unless the container carries PSV0, ISG1 and OSG1 and each parsed.
+bool DxilShaderShape(const void* code, size_t size, DxilShape& out);

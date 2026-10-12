@@ -7,6 +7,9 @@
 #include "../hooks/pipeline_hooks.h" // PipelineSrvRegs -- what the bound shaders read (PSV0)
 #include "draw_parts.h"
 #include "../textures/tex_eager.h" // a mod's textures still loading: its null is "not yet", not "unbind"
+#include "../rabbitfx/rabbitfx_bind.h"
+#include <algorithm>
+#include <unordered_map>
 
 static D3D12_CPU_DESCRIPTOR_HANDLE NullSrvDescriptor(ID3D12Device* dev, uint8_t kind)
 {
@@ -71,35 +74,38 @@ static D3D12_CPU_DESCRIPTOR_HANDLE NullSrvDescriptor(ID3D12Device* dev, uint8_t 
     return s_h[slot];
 }
 
-void StampSectionPsSlots(command_list* cmd_list, uint32_t gen0, const std::vector<uint32_t>& this_gen,
-    int dm, int comp)
+struct StampedSlot {
+    uint64_t src = 0;
+    uint32_t frame = 0;
+};
+static constexpr uint64_t                                    kReadAsBound = 1; // StampedSlot::src: a draw read the slot unstamped
+static std::mutex                                            g_stamped_mtx;
+static std::unordered_map<HeapKey, StampedSlot, HeapKeyHash> g_stamped;
+static uint32_t                                              g_stamped_frame = 0;
+
+static void StampedForThisFrame()
 {
-    if (!g_ps_slot_stamp || g_disable_tex || !g_d3d12_device || !cmd_list) return;
+    if (g_stamped_frame == g_frame_id) return;
+    g_stamped.clear();
+    g_stamped_frame = g_frame_id;
+}
+
+static void PlanStamps(SectionPsStamps& out, device* dev, const RootParam* root, const RegBind* t_ps, uint64_t pso,
+    uint64_t layh, uint32_t gen0, const std::vector<uint32_t>& this_gen)
+{
+    const int                    dm = out.dm;
+    const int                    comp = out.comp;
     const MigotoPort::PipeState& st = MigotoPort::State();
     const int                    si = MigotoPort::StageIndex('p');
-    bool                         any = false;
-    for (unsigned r = 0; r < MigotoPort::kMaxSRV && !any; ++r) any = (int32_t)(st.srv_gen[si][r] - gen0) > 0;
-    if (!any) return;
-    device*        dev = cmd_list->get_device();
-    const uint64_t layh = CmdGfxLayout(cmd_list);
-    static_assert(MigotoPort::kMaxSRV == RegisterFileWidth(TargetClass::ShaderResource), "PipeState and the register map disagree on the SRV file width");
-    RegBind t_ps[MigotoPort::kMaxSRV];
-    {
-        std::lock_guard l(g_layout_regmap_mtx);
-        auto            it = g_layout_regmap.find(layh);
-        if (it == g_layout_regmap.end() || !it->second.built) {
-            if (g_debug && DiagOnce("PS-SLOT-NOMAP", (int)(layh ^ (layh >> 32))))
-                logger::write("PS-SLOT-STAMP mod=%d comp=%d: no register map for layout %llx -- the section's ps-tN not applied",
-                    dm, comp, (unsigned long long)layh);
-            return;
-        }
-        memcpy(t_ps, it->second.t_ps, sizeof t_ps);
-    }
-    const auto&       root = CmdGfx(cmd_list).root;
-    const UINT        inc = g_d3d12_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-    const DxilSrvRegs ps_regs = PipelineSrvRegs(CmdGfx(cmd_list).gfx_pso, 'p'); // the null descriptor's dimension
+    const DxilSrvRegs            ps_regs = PipelineSrvRegs(pso, 'p');
     for (unsigned r = 0; r < MigotoPort::kMaxSRV; ++r) {
         if ((int32_t)(st.srv_gen[si][r] - gen0) <= 0) continue;
+        if (!ps_regs.reads(r)) {
+            if (g_debug && DiagOnce("PS-SLOT-UNREAD", CompKey(dm, comp) * 128 + (int)r))
+                logger::write("PS-SLOT-STAMP mod=%d comp=%d ps-t%u: the pixel shader does not read it -- not stamped",
+                    dm, comp, r);
+            continue;
+        }
         if (r < this_gen.size() && this_gen[r] && st.srv_gen[si][r] == this_gen[r]) {
             if (g_debug && DiagOnce("PS-SLOT-THIS", CompKey(dm, comp) * 128 + (int)r))
                 logger::write("PS-SLOT-STAMP mod=%d comp=%d ps-t%u: bound by a texture section's `this =` -- not "
@@ -128,16 +134,98 @@ void StampSectionPsSlots(command_list* cmd_list, uint32_t gen0, const std::vecto
         }
         const TableStart ts = TableStartOf(dev, root[b.param].table);
         if (!ts) continue;
-        ID3D12DescriptorHeap* heap = ts.Heap();
-        const uint32_t        slot = ts.base + b.offset;
-        if (slot >= heap->GetDesc().NumDescriptors) continue;
-        const D3D12_CPU_DESCRIPTOR_HANDLE dst{ heap->GetCPUDescriptorHandleForHeapStart().ptr + (SIZE_T)slot * inc };
-        g_d3d12_device->CopyDescriptorsSimple(1, dst, src, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-        if (res) g_heap_to_res.set_swapped({ ts.heap, slot }, res); // the frame dump publishes what the GPU reads
-        g_ps_slot_stamp_count.fetch_add(1, std::memory_order_relaxed);
-        if (g_debug && DiagChanged("PS-SLOT-STAMP", CompKey(dm, comp) * 128 + (int)r, (unsigned long long)src.ptr))
-            logger::write("PS-SLOT-STAMP mod=%d comp=%d ps-t%u <- %s (res=%p) at heap %p slot %u (p%u+%u) f=%u",
-                dm, comp, r, res ? "section resource" : "null", (void*)res, (void*)heap, slot,
-                (unsigned)b.param, b.offset, g_frame_id);
+        const uint32_t slot = ts.base + b.offset;
+        if (slot >= ts.Heap()->GetDesc().NumDescriptors) continue;
+        SectionPsSlot s;
+        s.reg = r;
+        s.param = b.param;
+        s.offset = b.offset;
+        s.heap = ts.heap;
+        s.slot = slot;
+        s.src = src;
+        s.res = res;
+        out.slots.push_back(s);
     }
+}
+
+SectionPsStamps PlanSectionPsSlots(command_list* cmd_list, uint32_t gen0, const std::vector<uint32_t>& this_gen,
+    int dm, int comp)
+{
+    SectionPsStamps out;
+    out.dm = dm;
+    out.comp = comp;
+    if (!g_ps_slot_stamp || g_disable_tex || !g_d3d12_device || !cmd_list) return out;
+    const MigotoPort::PipeState& st = MigotoPort::State();
+    const int                    si = MigotoPort::StageIndex('p');
+    bool                         any = false;
+    for (unsigned r = 0; r < MigotoPort::kMaxSRV && !any; ++r) any = (int32_t)(st.srv_gen[si][r] - gen0) > 0;
+    device*        dev = cmd_list->get_device();
+    const uint64_t layh = CmdGfxLayout(cmd_list);
+    static_assert(MigotoPort::kMaxSRV == RegisterFileWidth(TargetClass::ShaderResource), "PipeState and the register map disagree on the SRV file width");
+    RegBind t_ps[MigotoPort::kMaxSRV];
+    {
+        std::lock_guard l(g_layout_regmap_mtx);
+        auto            it = g_layout_regmap.find(layh);
+        if (it == g_layout_regmap.end() || !it->second.built) {
+            if (any && g_debug && DiagOnce("PS-SLOT-NOMAP", (int)(layh ^ (layh >> 32))))
+                logger::write("PS-SLOT-STAMP mod=%d comp=%d: no register map for layout %llx -- the section's ps-tN not applied",
+                    dm, comp, (unsigned long long)layh);
+            return out;
+        }
+        memcpy(t_ps, it->second.t_ps, sizeof t_ps);
+    }
+    const CmdState& gs = CmdGfx(cmd_list);
+    if (any) PlanStamps(out, dev, gs.root, t_ps, gs.gfx_pso, layh, gen0, this_gen);
+    std::vector<HeapKey> read_as_bound;
+    const uint64_t       reads = PipelinePsReadMask(gs.gfx_pso);
+    for (unsigned r = 0; r < 64; ++r) {
+        if (!((reads >> r) & 1u)) continue;
+        if (std::any_of(out.slots.begin(), out.slots.end(), [r](const SectionPsSlot& s) { return s.reg == r; })) continue;
+        const RegBind& b = t_ps[r];
+        if (b.param == 0xFF || b.param >= 64 || !b.is_table) continue;
+        const TableStart ts = TableStartOf(dev, gs.root[b.param].table);
+        if (ts) read_as_bound.push_back(HeapKey{ ts.heap, ts.base + b.offset });
+    }
+    {
+        std::lock_guard l(g_stamped_mtx);
+        StampedForThisFrame();
+        for (const SectionPsSlot& s : out.slots) {
+            auto it = g_stamped.find({ s.heap, s.slot });
+            if (it != g_stamped.end() && it->second.src != s.src.ptr) out.shared = true;
+        }
+        for (const HeapKey& k : read_as_bound) g_stamped.emplace(k, StampedSlot{ kReadAsBound, g_frame_id });
+    }
+    if (out.shared && g_debug && DiagOnce("PS-SLOT-SHARED", CompKey(dm, comp)))
+        logger::write("PS-SLOT-STAMP mod=%d comp=%d f=%u: a slot of this draw's table was stamped, or read unstamped, earlier "
+                      "this frame -- this draw binds through a private table",
+            dm, comp, g_frame_id);
+    return out;
+}
+
+void SectionPsStamps::StampInPlace() const
+{
+    if (slots.empty()) return;
+    const UINT                  inc = g_d3d12_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    std::lock_guard<std::mutex> l(g_stamped_mtx);
+    StampedForThisFrame();
+    for (const SectionPsSlot& s : slots) {
+        ID3D12DescriptorHeap*             heap = reinterpret_cast<ID3D12DescriptorHeap*>(s.heap);
+        const D3D12_CPU_DESCRIPTOR_HANDLE dst{ heap->GetCPUDescriptorHandleForHeapStart().ptr + (SIZE_T)s.slot * inc };
+        g_d3d12_device->CopyDescriptorsSimple(1, dst, s.src, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        if (s.res) g_heap_to_res.set_swapped({ s.heap, s.slot }, s.res); // the frame dump publishes what the GPU reads
+        g_stamped[{ s.heap, s.slot }] = StampedSlot{ s.src.ptr, g_frame_id };
+        g_ps_slot_stamp_count.fetch_add(1, std::memory_order_relaxed);
+        if (g_debug && DiagChanged("PS-SLOT-STAMP", CompKey(dm, comp) * 128 + (int)s.reg, (unsigned long long)s.src.ptr))
+            logger::write("PS-SLOT-STAMP mod=%d comp=%d ps-t%u <- %s (res=%p) at heap %p slot %u (p%u+%u) f=%u",
+                dm, comp, s.reg, s.res ? "section resource" : "null", (void*)s.res, (void*)heap, s.slot,
+                (unsigned)s.param, s.offset, g_frame_id);
+    }
+}
+
+void SectionPsStamps::QueueForShadow() const
+{
+    std::vector<ShadowSlotOvr> extra;
+    extra.reserve(slots.size());
+    for (const SectionPsSlot& s : slots) extra.push_back(ShadowSlotOvr{ s.param, s.offset, s.src });
+    AddShadowExtraSlots(extra.data(), (unsigned)extra.size());
 }

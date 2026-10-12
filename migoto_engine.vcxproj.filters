@@ -36,6 +36,9 @@
     <ClCompile Include="$(WwmiPristineDir)\ResourceHash.cpp">
       <Filter>3Dmigoto (unmodified)</Filter>
     </ClCompile>
+    <ClCompile Include="$(WwmiPristineDir)\HackerInputLayout.cpp">
+      <Filter>3Dmigoto (unmodified)</Filter>
+    </ClCompile>
     <ClCompile Include="$(WwmiPristineDir)\profiling.cpp">
       <Filter>3Dmigoto (unmodified)</Filter>
     </ClCompile>

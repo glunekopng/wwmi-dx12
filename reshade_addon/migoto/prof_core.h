@@ -4,9 +4,6 @@
 #include <windows.h>
 
 inline constexpr int kProfMaxBuckets = 96; // room for the addon's bucket list (static_assert in profiler.h)
-enum ProfVol { kProfVolDcCopies = 0,
-    kProfVolDcDescs = 1,
-    kProfVolDcSwaps = 2 };
 
 enum ProfGwKind {
     PGW_ShimCopy = 0, // Dx12Context::CopyResource / CopySubresourceRegion, buffer -> buffer (bytes)
@@ -17,6 +14,9 @@ enum ProfGwKind {
     PGW_ViewCreate,   // a D3D11 view created by the shim: one staging descriptor each (count only)
     PGW_Barrier,      // Transition(): a ResourceBarrier recorded (count only)
     PGW_Promoted,     // Transition(): a state change taken by implicit promotion, no barrier (count only)
+    PGW_UavBarrier,   // a UAV barrier a compute write owed, recorded (count only, per resource)
+    PGW_UavCovered,   // a UAV barrier a compute write owed, covered by the transition its next access took (count only)
+    PGW_ReadKept,     // OwnedTransition: a read of a buffer already in a read state that includes it, no barrier (count only)
     PGW_UploadDedup,  // QueueTextureUpload: an update written over one still queued for the same texture (count only)
     PGW_COUNT
 };
@@ -37,7 +37,6 @@ enum ProfLibStep {
     PL_COUNT
 };
 
-#ifdef WWMI_DEBUG
 inline bool g_prof_enabled = false;
 
 inline constexpr int         kProfThreads = 24;
@@ -45,7 +44,6 @@ inline std::atomic<uint32_t> g_prof_tid[kProfThreads];                        //
 inline std::atomic<uint64_t> g_prof_ns_t[kProfThreads][kProfMaxBuckets];      // INCLUSIVE, this frame, per thread
 inline std::atomic<uint64_t> g_prof_self_ns_t[kProfThreads][kProfMaxBuckets]; // EXCLUSIVE, same
 inline std::atomic<uint32_t> g_prof_calls_t[kProfThreads][kProfMaxBuckets];   // call count, same
-inline std::atomic<uint32_t> g_prof_vol_t[kProfThreads][16];                  // volume counters (ProfVol), same
 inline std::atomic<int>      g_prof_thread_n{ 0 };                            // slots claimed (drain only these)
 
 inline int ProfThreadSlot()
@@ -87,7 +85,6 @@ inline void                  ProfGpuWork(int kind, uint64_t bytes)
 }
 
 inline int g_prof_lib_bucket[PL_COUNT] = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 };
-inline void (*g_prof_self_sink)(int bucket, uint64_t self_ns) = nullptr;
 
 inline int64_t prof_qpc_freq()
 {
@@ -150,7 +147,6 @@ struct ProfScope {
         g_prof_calls_t[slot][b].fetch_add(1u, std::memory_order_relaxed);
         g_prof_ns_t[slot][b].fetch_add(ns, std::memory_order_relaxed);
         g_prof_self_ns_t[slot][b].fetch_add(self, std::memory_order_relaxed);
-        if (g_prof_self_sink) g_prof_self_sink(b, self);
         if (t_prof_cur == this) {
             t_prof_cur = prev;
             if (prev) prev->child += ns;
@@ -162,13 +158,3 @@ struct ProfScope {
 #define PROF_CONCAT2(a, b) a##b
 #define PROF_CONCAT(a, b) PROF_CONCAT2(a, b)
 #define PROF(bucket) ProfScope PROF_CONCAT(_prof_, __LINE__)(bucket)
-#else
-inline constexpr bool g_prof_enabled = false;
-inline void           ProfGpuWork(int, uint64_t) {}
-struct ProfScope {
-    explicit ProfScope(int) {}
-    explicit ProfScope(ProfLibStep) {}
-    void End() {}
-};
-#define PROF(bucket) ((void)0)
-#endif

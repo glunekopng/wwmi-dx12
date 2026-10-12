@@ -7,6 +7,7 @@
 #include "../mods/layout_registry.h"
 #include "draw_ctx.h"
 #include "draw_parts.h"
+#include "../instrumentation/hot_path.h"
 #include <optional>
 
 thread_local uint8_t  t_x23_claimed = 0;
@@ -38,6 +39,7 @@ bool on_draw_indexed_body(command_list* cmd_list, uint32_t index_count, uint32_t
 
     if (g_debug) ShaderDiffNote(cmd_list, vs_hash, index_count);
     NoteMeshPlaces(args);
+    CarryPsReads(args);
 
     if (index_count >= 256 && logger::enabled(3)) { // feeds only the SEEDHB trace line
         uint64_t hbvb0 = 0;
@@ -61,6 +63,12 @@ bool on_draw_indexed_body(command_list* cmd_list, uint32_t index_count, uint32_t
         }
     }
 
+    struct PostAfterDraw {
+        ~PostAfterDraw()
+        {
+            PortApi::RunPendingPost();
+        }
+    } post_after_draw;
     if (RunDrawShaderOverrides(args)) return true;
 
     DrawClaim claim;

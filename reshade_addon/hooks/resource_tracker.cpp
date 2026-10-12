@@ -373,13 +373,11 @@ bool on_copy_descriptor_tables(device* device, uint32_t count, const descriptor_
 {
     PROF(PROF_DescCopy);
     if (g_addon_disabled) return false;
-    if (g_prof_enabled) ProfVolAdd(kProfVolDcCopies, count); // volume: copy ops this frame
     auto* d3d12_dev = reinterpret_cast<ID3D12Device*>(device->get_native());
     // Also a device constant, not a per-call query.
     static uint32_t s_inc = 0;
     if (!s_inc && d3d12_dev) s_inc = d3d12_dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     const uint32_t      inc = s_inc ? s_inc : 32u;
-    uint32_t            walked = 0;
     uint64_t            prev_s = 0;
     uint64_t            prev_d = 0;
     FlatHeapMap::Entry* prev_se = nullptr;
@@ -394,7 +392,6 @@ bool on_copy_descriptor_tables(device* device, uint32_t count, const descriptor_
         device->get_descriptor_heap_offset(copy.source_table, copy.source_binding, 0, &s_heap, &s_off);
         device->get_descriptor_heap_offset(copy.dest_table, copy.dest_binding, 0, &d_heap, &d_off);
         if (s_heap.handle == 0 || d_heap.handle == 0) continue;
-        walked += copy.count;
         if (s_heap.handle != prev_s) {
             prev_se = g_heap_to_res.entry_of(s_heap.handle); // once per heap per call, not per descriptor
             prev_s_lo = prev_se ? prev_se->lo.load(std::memory_order_relaxed) : HeapCpuStart(s_heap.handle).ptr;
@@ -427,7 +424,6 @@ bool on_copy_descriptor_tables(device* device, uint32_t count, const descriptor_
             FlatHeapMap::set_at(dp, src, seq, g_frame_id, 2, swapped);
         }
     }
-    if (g_prof_enabled && walked) ProfVolAdd(kProfVolDcDescs, walked); // volume: descriptors walked
     return false;
 }
 

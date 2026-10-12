@@ -2,6 +2,7 @@
 #include "../addon_common.h"
 #include "pipeline_hooks.h"
 #include "../mods/shader_alias.h" // AliasShaderHashAlways -- shader identity is registered at creation
+#include "../hud/uid_hide.h"
 #include "../../src/dxil_cb.h"    // DxilCbuffers -- the VS's declared cbuffer sizes, from the DXIL metadata
 #include <array>
 
@@ -49,7 +50,11 @@ struct PsoSlot {
     std::atomic<uint64_t> ps{ 0 };
     std::atomic<uint64_t> gs{ 0 };
     std::atomic<uint64_t> dc{ 0 };
-}; // dc: 0 = not asked, 1 = asked / none, else the variant
+    std::atomic<uint64_t> psr{ ~0ull };
+    std::atomic<bool>     text{ false };
+    std::atomic<uint64_t> uc{ 0 };
+    std::atomic<uint32_t> ucz{ 0 };
+}; // dc: 0 = not asked, 1 = asked / none, else the variant; psr: PipelinePsReadMask; text: its PS draws UI text; uc: as dc, the UID-cut variant for the back buffer size ucz
 struct PsoTab {
     uint32_t cap;
     PsoSlot* e;
@@ -94,6 +99,10 @@ PsoSlot* PsoSlotOf(uint64_t key, bool create)
             n->ps.store(o.ps.load(std::memory_order_relaxed), std::memory_order_relaxed);
             n->gs.store(o.gs.load(std::memory_order_relaxed), std::memory_order_relaxed);
             n->dc.store(o.dc.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            n->psr.store(o.psr.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            n->text.store(o.text.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            n->uc.store(o.uc.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            n->ucz.store(o.ucz.load(std::memory_order_relaxed), std::memory_order_relaxed);
             n->key.store(k, std::memory_order_release);
         }
         g_pso_tab.store(g, std::memory_order_release);
@@ -127,6 +136,31 @@ uint64_t PsoDecensorVariant(device* dev, uint64_t pso)
 void PsoSetDecensorVariant(uint64_t pso, uint64_t variant)
 {
     if (PsoSlot* s = PsoSlotOf(pso, false)) s->dc.store(variant ? variant : 1, std::memory_order_release);
+}
+uint64_t PsoUidVariant(device* dev, uint64_t pso, uint32_t target)
+{
+    PsoSlot* s = PsoSlotOf(pso, false);
+    if (!s || !target || !s->text.load(std::memory_order_acquire)) return 0;
+    uint32_t z = s->ucz.load(std::memory_order_acquire);
+    if (z == target) {
+        const uint64_t v = s->uc.load(std::memory_order_acquire);
+        return v > 1 ? v : 0;
+    }
+    if (s->ucz.compare_exchange_strong(z, target, std::memory_order_acq_rel)) {
+        s->uc.store(1, std::memory_order_release);
+        RfxUidQueue(dev, pso, target, UidHide::Cuts(target));
+    }
+    return 0;
+}
+void PsoSetUidVariant(uint64_t pso, uint32_t target, uint64_t variant)
+{
+    if (PsoSlot* s = PsoSlotOf(pso, false))
+        if (s->ucz.load(std::memory_order_acquire) == target) s->uc.store(variant ? variant : 1, std::memory_order_release);
+}
+uint64_t PipelinePsReadMask(uint64_t pso)
+{
+    const PsoSlot* s = PsoSlotOf(pso, false);
+    return s ? s->psr.load(std::memory_order_acquire) : ~0ull;
 }
 
 static thread_local std::vector<std::vector<uint8_t>> s_replace_keep;
@@ -299,10 +333,16 @@ void on_init_pipeline(device*, pipeline_layout layout, uint32_t subobject_count,
                 logger::trace("INPUTLAYOUT vs=%016llx n=%u %s", vs_hash, subobjects[i].count, s.c_str());
             }
     }
+    uint64_t ps_reads = ~0ull;
     {
         DxilSrvRegs     pr;
         DxilSrvRegs     vr;
         const bool      pp = ps_code && DxilShaderSrvRegs(ps_code, ps_size, pr);
+        if (pp) {
+            ps_reads = 0;
+            for (unsigned r = 0; r < 64; ++r)
+                if (pr.reads(r)) ps_reads |= 1ull << r;
+        }
         const bool      vp = vs_code && DxilShaderSrvRegs(vs_code, vs_size, vr);
         std::lock_guard lock(g_addon_mutex);
         if (pp)
@@ -317,9 +357,15 @@ void on_init_pipeline(device*, pipeline_layout layout, uint32_t subobject_count,
             logger::write("PSV0: pixel shader %016llx carries no PSV0 part (%zu bytes) -- its register file is the root signature's",
                 (unsigned long long)ps_hash, ps_size);
     }
+    const bool text = ps_code && UidHide::IsTextShader(ps_code, ps_size);
+    if (text) logger::write("UIDCUT: pso %llx draws UI text (ps=%016llx)", pipeline.handle, (unsigned long long)ps_hash);
     if (vs_hash || cs_hash || ps_hash || gs_hash)
         if (PsoSlot* s = PsoSlotOf(pipeline.handle, true)) {
             s->dc.store(0, std::memory_order_release);
+            s->psr.store(ps_reads, std::memory_order_release);
+            s->text.store(text, std::memory_order_release);
+            s->uc.store(0, std::memory_order_release);
+            s->ucz.store(0, std::memory_order_release);
             if (vs_hash) s->vc.store(vs_hash, std::memory_order_release);
             if (cs_hash) s->vc.store(cs_hash, std::memory_order_release);
             if (ps_hash) s->ps.store(ps_hash, std::memory_order_release);
@@ -383,6 +429,10 @@ void on_destroy_pipeline(device* device, pipeline pipeline)
             s->ps.store(0);
             s->gs.store(0);
             s->dc.store(0);
+            s->psr.store(~0ull);
+            s->text.store(false);
+            s->uc.store(0);
+            s->ucz.store(0);
         }
         std::lock_guard lock(g_addon_mutex);
         g_pipeline_ps_regs.erase(pipeline.handle);

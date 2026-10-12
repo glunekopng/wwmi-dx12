@@ -10,6 +10,9 @@
     <Filter Include="hooks">
       <UniqueIdentifier>{c3219b31-4d12-5319-ac1b-a1b3a53eb977}</UniqueIdentifier>
     </Filter>
+    <Filter Include="hud">
+      <UniqueIdentifier>{553229c1-0f77-5631-85e3-009bf40c0a65}</UniqueIdentifier>
+    </Filter>
     <Filter Include="instrumentation">
       <UniqueIdentifier>{4c25c647-23e6-53d7-9061-73d2a5875915}</UniqueIdentifier>
     </Filter>
@@ -202,6 +205,15 @@
     <ClCompile Include="reshade_addon\instrumentation\crash_handler.cpp">
       <Filter>instrumentation</Filter>
     </ClCompile>
+    <ClCompile Include="reshade_addon\instrumentation\gpu_timer.cpp">
+      <Filter>instrumentation</Filter>
+    </ClCompile>
+    <ClCompile Include="reshade_addon\instrumentation\perf_monitor.cpp">
+      <Filter>instrumentation</Filter>
+    </ClCompile>
+    <ClCompile Include="reshade_addon\hud\uid_hide.cpp">
+      <Filter>hud</Filter>
+    </ClCompile>
     <ClCompile Include="reshade_addon\rt\rt_stub.cpp">
       <Filter>rt</Filter>
     </ClCompile>
@@ -217,22 +229,16 @@
     <ClCompile Include="reshade_addon\instrumentation\draw_dump_publish.cpp">
       <Filter>instrumentation</Filter>
     </ClCompile>
-    <ClCompile Include="reshade_addon\instrumentation\morph_dump.cpp">
-      <Filter>instrumentation</Filter>
-    </ClCompile>
-    <ClCompile Include="reshade_addon\instrumentation\occlusion_probe.cpp">
-      <Filter>instrumentation</Filter>
-    </ClCompile>
-    <ClCompile Include="reshade_addon\instrumentation\gpu_timer.cpp">
-      <Filter>instrumentation</Filter>
-    </ClCompile>
     <ClCompile Include="reshade_addon\instrumentation\hot_path.cpp">
       <Filter>instrumentation</Filter>
     </ClCompile>
     <ClCompile Include="reshade_addon\instrumentation\hot_path_gpu.cpp">
       <Filter>instrumentation</Filter>
     </ClCompile>
-    <ClCompile Include="reshade_addon\instrumentation\profiler_mem.cpp">
+    <ClCompile Include="reshade_addon\instrumentation\morph_dump.cpp">
+      <Filter>instrumentation</Filter>
+    </ClCompile>
+    <ClCompile Include="reshade_addon\instrumentation\occlusion_probe.cpp">
       <Filter>instrumentation</Filter>
     </ClCompile>
     <ClCompile Include="reshade_addon\instrumentation\skeleton_dump.cpp">

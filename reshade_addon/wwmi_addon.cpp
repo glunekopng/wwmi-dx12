@@ -428,7 +428,9 @@ static void ActivateD3D12()
     reshade::register_event<reshade::addon_event::present>(HP(present));
 
     ProfBindLibSteps(); // the lib's timed steps -> their rows, before the overlay can enable the profiler
-    reshade::register_overlay("wwmi-dx12", DrawOverlay);
+    DockOverlayPanelOnce();
+    reshade::register_event<reshade::addon_event::reshade_open_overlay>(OnOverlayOpen);
+    reshade::register_event<reshade::addon_event::reshade_overlay>(DrawOverlayPanel);
     ::logger::write("Init: D3D12 device -- events + overlay registered");
 }
 
@@ -498,6 +500,7 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE)
     g_dx12_debug_layer = GetPrivateProfileIntW(L"wwmi-dx12", L"dx12_debug_layer", 0, ini_path.c_str()) != 0;
     g_addon_ini_path = ini_path;
     g_decensor = GetPrivateProfileIntW(L"wwmi-dx12", L"decensor", 0, ini_path.c_str()) != 0;
+    g_hide_uid = GetPrivateProfileIntW(L"wwmi-dx12", L"hide_uid", 0, ini_path.c_str()) != 0;
 #ifdef WWMI_DEBUG
     g_hide_outline = GetPrivateProfileIntW(L"wwmi-dx12", L"hide_outline", 0, ini_path.c_str()) != 0;
 #endif
@@ -505,7 +508,7 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE)
     g_texlod_resemblance = GetPrivateProfileIntW(L"wwmi-dx12", L"lod_resemblance", 1, ini_path.c_str()) != 0;
     g_texlod_cache = GetPrivateProfileIntW(L"wwmi-dx12", L"lod_cache", 1, ini_path.c_str()) != 0;
     MigotoPort::g_buffers_in_vram = GetPrivateProfileIntW(L"wwmi-dx12", L"buffers_in_vram", 1, ini_path.c_str()) != 0;
-    ::logger::write("Config: decensor=%d lod_resemblance=%d lod_cache=%d buffers_in_vram=%d", (int)g_decensor,
+    ::logger::write("Config: decensor=%d hide_uid=%d lod_resemblance=%d lod_cache=%d buffers_in_vram=%d", (int)g_decensor, (int)g_hide_uid,
         (int)g_texlod_resemblance, (int)g_texlod_cache, (int)MigotoPort::g_buffers_in_vram);
     if (g_dx12_debug_layer) {
         ID3D12Debug*  dbg = nullptr;

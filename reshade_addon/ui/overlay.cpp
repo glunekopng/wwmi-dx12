@@ -3,7 +3,7 @@
 #include "overlay.h"
 #include "../config.h"
 #include "../build_stamp.h"
-#include "../instrumentation/profiler.h"
+#include "../instrumentation/perf_monitor.h"
 #include "../instrumentation/diagnostics.h"
 #include "../migoto/frame_analysis_driver.h"
 #include "../mods/skeleton.h"
@@ -16,12 +16,15 @@
 #include "../instrumentation/morph_dump.h"
 #include "../migoto/port_api.h"      // the loaded engine: variables for the PANELGATE dump
 #include "../migoto/dx12_bridge.h"   // X30 counters
-#include "../migoto/port_toggles.h"  // g_inherit_game_viewport, g_port_post_split, g_blend_write_all_rt, g_buffers_in_vram
+#include "../migoto/port_toggles.h"  // g_inherit_game_viewport, g_port_post_split, g_blend_write_all_rt, g_buffers_in_vram, g_lazy_restore
 #include "../migoto/dx12_pipeline.h" // ArmPresentDrawProbe (PRESENTDRAW)
 #include "../rabbitfx/pso_blend.h"   // GetRfxPatchStats (E2)
 #include "../../src/log.h"           // PANELGATE dump
+#include <atomic>
 #include <cstdio>
+#include <cstring>
 #include <set>
+#include <vector>
 #include <unordered_map>
 #include <string>
 #include "../instrumentation/sk_ring.h"
@@ -113,9 +116,300 @@ static const char* StoppedText()
     return g_faulted ? kFaultedText : kRtBlockedText;
 }
 
+namespace {
+
+constexpr ImGuiID     kPanelSplitNode = 0x57570D01;
+constexpr ImGuiID     kPanelNode = 0x57570D02;
+constexpr const char* kPanelWindow = "WWMI-DX12###wwmi-dx12-panel";
+constexpr const char* kPanelSettings = "[Window][###wwmi-dx12-panel]";
+std::atomic<bool>     g_overlay_open{ false };
+
+std::vector<std::string> ConfigLines(const char* section, const char* key)
+{
+    size_t size = 0;
+    if (!reshade::get_config_value(nullptr, section, key, nullptr, &size) || size < 2) return {};
+    std::string value(size, '\0');
+    if (!reshade::get_config_value(nullptr, section, key, value.data(), &size)) return {};
+    value.resize(size < value.size() ? size : value.size());
+    std::vector<std::string> out;
+    for (size_t at = 0; at < value.size();) {
+        size_t end = value.find('\0', at);
+        if (end == std::string::npos) end = value.size();
+        if (end > at) out.emplace_back(value, at, end - at);
+        at = end + 1;
+    }
+    return out;
+}
+
+void SetConfigLines(const char* section, const char* key, const std::vector<std::string>& lines)
+{
+    std::string joined;
+    for (const std::string& l : lines) {
+        joined += l;
+        joined += '\0';
+    }
+    reshade::set_config_value(nullptr, section, key, joined.c_str(), joined.size());
+}
+
+struct DockLine {
+    size_t   index = 0;
+    unsigned id = 0;
+    unsigned parent = 0;
+    int      w = 0;
+    int      h = 0;
+    bool     central = false;
+    bool     split_x = false;
+
+    bool Read(const std::string& s, size_t i)
+    {
+        const char* p = s.c_str();
+        while (*p == ' ') ++p;
+        if (strncmp(p, "DockNode", 8) != 0 && strncmp(p, "DockSpace", 9) != 0) return false;
+        index = i;
+        if (const char* f = strstr(p, " ID=0x")) sscanf_s(f, " ID=0x%X", &id);
+        if (const char* f = strstr(p, "Parent=0x")) sscanf_s(f, "Parent=0x%X", &parent);
+        if (const char* f = strstr(p, "SizeRef=")) sscanf_s(f, "SizeRef=%d,%d", &w, &h);
+        central = strstr(p, "CentralNode=1") != nullptr;
+        split_x = strstr(p, "Split=X") != nullptr;
+        return id != 0;
+    }
+};
+
+const DockLine* FindDock(const std::vector<DockLine>& nodes, unsigned id)
+{
+    for (const DockLine& d : nodes)
+        if (d.id == id) return &d;
+    return nullptr;
+}
+
+std::string ReplaceField(std::string line, const char* field, const std::string& value)
+{
+    const size_t at = line.find(field);
+    if (at == std::string::npos) return line;
+    size_t end = line.find(' ', at);
+    if (end == std::string::npos) end = line.size();
+    return line.replace(at, end - at, std::string(field) + value);
+}
+
+unsigned WindowDockNode(const std::vector<std::string>& windows, const char* header)
+{
+    unsigned node = 0;
+    for (size_t i = 0; i < windows.size(); ++i) {
+        if (windows[i] != header) continue;
+        for (size_t j = i + 1; j < windows.size() && windows[j].rfind("[Window][", 0) != 0; ++j)
+            sscanf_s(windows[j].c_str(), "DockId=0x%X", &node);
+    }
+    return node;
+}
+
+void PointPanelAt(std::vector<std::string>& windows, unsigned node)
+{
+    char dock[48];
+    std::snprintf(dock, sizeof dock, "DockId=0x%08X,0", node);
+    for (size_t i = 0; i < windows.size(); ++i) {
+        if (windows[i] != kPanelSettings) continue;
+        size_t j = i + 1;
+        for (; j < windows.size() && windows[j].rfind("[Window][", 0) != 0; ++j)
+            if (windows[j].rfind("DockId=", 0) == 0) {
+                windows[j] = dock;
+                return;
+            }
+        windows.insert(windows.begin() + j, dock);
+        return;
+    }
+    windows.push_back(kPanelSettings);
+    windows.push_back("Collapsed=0");
+    windows.push_back(dock);
+}
+
+const char* SplitBesideReShade(std::vector<std::string>& docking, unsigned home_node)
+{
+    if (docking.empty() || docking[0] != "[Docking][Data]") return "no saved docking";
+    std::vector<DockLine> nodes;
+    for (size_t i = 0; i < docking.size(); ++i) {
+        DockLine d;
+        if (d.Read(docking[i], i)) nodes.push_back(d);
+    }
+    if (FindDock(nodes, kPanelNode)) return nullptr;
+    const DockLine* home = FindDock(nodes, home_node);
+    const DockLine* central = nullptr;
+    for (const DockLine& d : nodes)
+        if (d.central) central = &d;
+    if (!home || !central || !central->parent || home->parent != central->parent) return "ReShade's tabs are not beside the free area";
+    const DockLine* split = FindDock(nodes, central->parent);
+    if (!split || !split->split_x) return "ReShade's tabs are not left or right of the free area";
+    const int panel_w = home->w;
+    const int rest_w = central->w - panel_w;
+    if (panel_w < 100 || rest_w < 200) return "the free area is too narrow";
+    std::string rest = ReplaceField(docking[central->index], "SizeRef=", std::to_string(rest_w) + "," + std::to_string(central->h));
+    char        parent[16];
+    std::snprintf(parent, sizeof parent, "0x%08X", kPanelSplitNode);
+    rest = ReplaceField(rest, "Parent=", parent);
+    char outer[160];
+    std::snprintf(outer, sizeof outer, "  DockNode  ID=0x%08X Parent=0x%08X SizeRef=%d,%d Split=X", kPanelSplitNode, central->parent,
+        central->w, central->h);
+    char panel[160];
+    std::snprintf(panel, sizeof panel, "    DockNode  ID=0x%08X Parent=0x%08X SizeRef=%d,%d", kPanelNode, kPanelSplitNode, panel_w,
+        central->h);
+    const bool               reshade_left = home->index < central->index;
+    std::vector<std::string> out(docking.begin(), docking.begin() + central->index);
+    out.push_back(outer);
+    out.push_back(reshade_left ? rest : std::string(panel));
+    out.push_back(reshade_left ? std::string(panel) : rest);
+    out.insert(out.end(), docking.begin() + central->index + 1, docking.end());
+    docking.swap(out);
+    return nullptr;
+}
+
+} // namespace
+
+void DockOverlayPanelOnce()
+{
+    int docked = 0;
+    if (reshade::get_config_value(nullptr, "wwmi-dx12", "PanelDocked", docked) && docked) return;
+    std::vector<std::string> windows = ConfigLines("OVERLAY", "Window");
+    std::vector<std::string> docking = ConfigLines("OVERLAY", "Docking");
+    const unsigned           home_node = WindowDockNode(windows, "[Window][###home]");
+    const char*              why = home_node ? SplitBesideReShade(docking, home_node) : "ReShade's window is not docked";
+    if (why) {
+        logger::write("PANELDOCK: the add-on's window is not docked (%s) -- it opens on the right, placed by hand", why);
+        return;
+    }
+    PointPanelAt(windows, kPanelNode);
+    SetConfigLines("OVERLAY", "Docking", docking);
+    SetConfigLines("OVERLAY", "Window", windows);
+    reshade::set_config_value(nullptr, "wwmi-dx12", "PanelDocked", 1);
+    logger::write("PANELDOCK: the add-on's window docked on the side of the free area away from ReShade's tabs -- once; "
+                  "a later move is kept");
+}
+
+bool OnOverlayOpen(effect_runtime*, bool open, input_source)
+{
+    g_overlay_open.store(open, std::memory_order_relaxed);
+    return false;
+}
+
+void DrawOverlayPanel(effect_runtime* runtime)
+{
+    if (!g_overlay_open.load(std::memory_order_relaxed)) return;
+    const ImGuiIO& io = ImGui::GetIO();
+    const float    w = io.DisplaySize.x * 0.27f;
+    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - w - 8.f, 8.f), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(w, io.DisplaySize.y - 16.f), ImGuiCond_FirstUseEver);
+    if (ImGui::Begin(kPanelWindow)) DrawOverlay(runtime);
+    ImGui::End();
+}
+
 void DrawStoppedNotice(effect_runtime*)
 {
     ImGui::TextColored({ 1, 0.4f, 0.4f, 1 }, "wwmi-dx12: %s", StoppedText());
+}
+
+static ImVec4 MemoryColour(uint64_t used, uint64_t budget)
+{
+    const double pct = budget ? 100.0 * (double)used / (double)budget : 0.0;
+    if (pct >= 100.0) return { 1, 0.4f, 0.3f, 1 };
+    if (pct >= 90.0) return { 1, 0.8f, 0.3f, 1 };
+    return ImGui::GetStyle().Colors[ImGuiCol_Text];
+}
+
+static void DrawPerformanceDetails(const PerfFigures& s)
+{
+    ImGui::PushTextWrapPos(-1.0f);
+    if (ImGui::BeginTable("perfareas", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_SizingFixedFit)) {
+        ImGui::TableSetupColumn("Processor work");
+        ImGui::TableSetupColumn("ms a frame");
+        ImGui::TableSetupColumn("share");
+        ImGui::TableHeadersRow();
+        for (int a = 0; a < PA_COUNT; ++a) {
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(kPerfAreaNames[a]);
+            ImGui::TableNextColumn();
+            ImGui::Text("%.3f", s.area_ms[a]);
+            ImGui::TableNextColumn();
+            ImGui::Text("%.0f%%", s.cpu_all_ms > 0.0 ? 100.0 * s.area_ms[a] / s.cpu_all_ms : 0.0);
+        }
+        ImGui::EndTable();
+    }
+    if (ImGui::BeginTable("perfgpu", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_SizingFixedFit)) {
+        ImGui::TableSetupColumn("Graphics card work");
+        ImGui::TableSetupColumn("ms a frame");
+        ImGui::TableHeadersRow();
+        for (int a = 0; a < kPerfGpuAreaCount; ++a) {
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(kPerfGpuAreas[a].name);
+            ImGui::TableNextColumn();
+            ImGui::Text("%.3f", s.gpu_area_ms[a]);
+        }
+        ImGui::EndTable();
+    }
+    ImGui::PopTextWrapPos();
+    ImGui::Text("Busiest thread %u: %.2f ms a frame; %.2f ms over the %d threads the add-on ran on", s.cpu_busiest_tid,
+        s.cpu_busiest_ms, s.cpu_all_ms, s.cpu_threads);
+    ImGui::TextDisabled("Measuring costs %.2f ms a frame over all threads, left out of the figures above.", s.timers_ms);
+    if (ImGui::TreeNode("Every measured step")) {
+        ImGui::PushTextWrapPos(-1.0f);
+        if (ImGui::BeginTable("perfsteps", 5, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_SizingFixedFit)) {
+            ImGui::TableSetupColumn("step");
+            ImGui::TableSetupColumn("with inner ms");
+            ImGui::TableSetupColumn("own ms");
+            ImGui::TableSetupColumn("slowest frame ms");
+            ImGui::TableSetupColumn("calls a frame");
+            ImGui::TableHeadersRow();
+            for (int i = 0; i < PROF_COUNT; ++i) {
+                const PerfStep& p = s.steps[i];
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(kProfSteps[i].name);
+                ImGui::TableNextColumn();
+                if (p.incl_ms >= 0.05)
+                    ImGui::Text("%.3f", p.incl_ms);
+                else
+                    ImGui::TextDisabled("%.3f", p.incl_ms);
+                ImGui::TableNextColumn();
+                if (p.self_ms >= 0.05)
+                    ImGui::Text("%.3f", p.self_ms);
+                else
+                    ImGui::TextDisabled("%.3f", p.self_ms);
+                ImGui::TableNextColumn();
+                ImGui::Text("%.3f", p.max_ms);
+                ImGui::TableNextColumn();
+                ImGui::Text("%.0f", p.calls);
+            }
+            ImGui::EndTable();
+        }
+        ImGui::PopTextWrapPos();
+        ImGui::TreePop();
+    }
+}
+
+static void DrawPerformanceSummary()
+{
+    if (!g_perf.HaveShown()) {
+        ImGui::TextDisabled("Measuring...");
+    } else {
+        const PerfFigures& s = g_perf.Shown();
+        ImGui::Text("Frame rate: %.0f FPS (slowest frame %.0f FPS)", s.fps, s.slowest_fps);
+        ImGui::Text("Add-on on the processor: %.2f ms a frame -- without it, up to %.0f FPS more", s.cpu_busiest_ms,
+            PerfFpsGain(s.frame_ms, s.cpu_busiest_ms));
+        if (s.gpu_read)
+            ImGui::Text("Add-on on the graphics card: %.2f ms a frame -- without it, up to %.0f FPS more", s.gpu_ms,
+                PerfFpsGain(s.frame_ms, s.gpu_ms));
+        else
+            ImGui::TextDisabled("Add-on on the graphics card: no reading yet");
+    }
+    if (g_perf.HaveMemory()) {
+        constexpr double  GB = 1024.0 * 1024.0 * 1024.0;
+        const PerfMemory& m = g_perf.MemoryNow();
+        const PerfMemory& pk = g_perf.MemoryPeak();
+        ImGui::TextColored(MemoryColour(m.vram_used, m.vram_budget), "Video memory: %.1f of %.1f GB (%.0f%%), highest %.1f GB",
+            m.vram_used / GB, m.vram_budget / GB, m.vram_budget ? 100.0 * (double)m.vram_used / (double)m.vram_budget : 0.0,
+            pk.vram_used / GB);
+        ImGui::Text("Shared memory (system memory the graphics card uses): %.1f GB", m.shared_used / GB);
+        ImGui::Text("Game memory: %.1f GB", m.game_private / GB);
+    }
 }
 
 void DrawOverlay(effect_runtime*)
@@ -176,6 +470,8 @@ void DrawOverlay(effect_runtime*)
     }
     if (NCheckbox("A4", "Decensor", &g_decensor) && !g_addon_ini_path.empty())
         WritePrivateProfileStringW(L"wwmi-dx12", L"decensor", g_decensor ? L"1" : L"0", g_addon_ini_path.c_str());
+    if (NCheckbox("A5", "Hide UID (your player number: bottom right, Esc menu, Friends list)", &g_hide_uid) && !g_addon_ini_path.empty())
+        WritePrivateProfileStringW(L"wwmi-dx12", L"hide_uid", g_hide_uid ? L"1" : L"0", g_addon_ini_path.c_str());
 #ifdef WWMI_DEBUG
     if (NCheckbox("A8", "Hide mod outlines", &g_hide_outline) && !g_addon_ini_path.empty())
         WritePrivateProfileStringW(L"wwmi-dx12", L"hide_outline", g_hide_outline ? L"1" : L"0", g_addon_ini_path.c_str());
@@ -202,6 +498,12 @@ void DrawOverlay(effect_runtime*)
     ImGui::TextDisabled("  on = no stutter when a modded character first shows; its own textures appear a moment later.\n"
                         "  off = the mod's textures from the first frame; the game pauses briefly while they load.\n"
                         "  Applies to characters that show after the change.");
+    if (NCheckbox("A16", "Mod buffers (meshes, shape keys) in video memory", &MigotoPort::g_buffers_in_vram) && !g_addon_ini_path.empty())
+        WritePrivateProfileStringW(L"wwmi-dx12", L"buffers_in_vram", MigotoPort::g_buffers_in_vram ? L"1" : L"0",
+            g_addon_ini_path.c_str());
+    ImGui::TextDisabled("  on = faster drawing of modded characters.\n"
+                        "  off = kept in system memory, for cards short on video memory; costs frame rate with large mods.\n"
+                        "  Applies after Reload mods (B1) or at the next launch.");
     {
         int mods = 0;
         ModLoader::GetLastStats(mods);
@@ -231,166 +533,22 @@ void DrawOverlay(effect_runtime*)
         g_reload_requested.store(true);
         logger::write("RELOAD: requested from overlay -- will run at the next frame boundary");
     }
-#ifdef WWMI_DEBUG
-
-    // ---- Pipeline profiler: 1-second min/avg/max windows -----------------------
-    if (ImGui::CollapsingHeader("Pipeline profiler (1-second min/avg/max)")) {
-        ImGui::Checkbox("Enable profiler (adds QPC timers to hot hooks)", &g_prof_enabled);
-        double fra = g_prof_disp_fr_avg;
-        ImGui::Text("Frame: avg %.2f ms (%.0f fps)  |  min %.2f  max %.2f ms  (%d frames/s)",
-            fra, g_prof_disp_fps, g_prof_disp_fr_min, g_prof_disp_fr_max, g_prof_disp_frames);
-        if (g_prof_enabled) {
-            ImGui::Separator();
-            ImGui::PushTextWrapPos(-1.0f);
-            if (ImGui::BeginTable("proftab", 8, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_SizingFixedFit)) {
-                ImGui::TableSetupColumn("step");
-                ImGui::TableSetupColumn("incl ms");
-                ImGui::TableSetupColumn("incl %");
-                ImGui::TableSetupColumn("self ms");
-                ImGui::TableSetupColumn("self %");
-                ImGui::TableSetupColumn("us/call");
-                ImGui::TableSetupColumn("max ms");
-                ImGui::TableSetupColumn("calls/f");
-                ImGui::TableHeadersRow();
-                for (int i = 0; i < PROF_COUNT; ++i) {
-                    const double   avg = g_prof_disp_avg_ms[i];
-                    const double   self = g_prof_disp_self_ms[i];
-                    const uint32_t nc = g_prof_disp_calls[i];
-                    const double   ipct = fra > 0.0 ? 100.0 * avg / fra : 0.0;
-                    const double   spct = fra > 0.0 ? 100.0 * self / fra : 0.0;
-                    ImGui::TableNextRow();
-                    ImGui::TableNextColumn();
-                    ImGui::TextUnformatted(g_prof_names[i]);
-                    ImGui::TableNextColumn();
-                    if (avg >= 0.05)
-                        ImGui::Text("%.3f", avg);
-                    else
-                        ImGui::TextDisabled("%.3f", avg);
-                    ImGui::TableNextColumn();
-                    if (ipct >= 5.0)
-                        ImGui::TextColored({ 1, 0.5f, 0.3f, 1 }, "%.1f%%", ipct);
-                    else
-                        ImGui::Text("%.1f%%", ipct);
-                    ImGui::TableNextColumn();
-                    if (self >= 0.05 && self > 0.5 * avg)
-                        ImGui::TextColored({ 1, 0.85f, 0.4f, 1 }, "%.3f", self);
-                    else if (self >= 0.05)
-                        ImGui::Text("%.3f", self);
-                    else
-                        ImGui::TextDisabled("%.3f", self);
-                    ImGui::TableNextColumn();
-                    if (spct >= 5.0)
-                        ImGui::TextColored({ 1, 0.85f, 0.4f, 1 }, "%.1f%%", spct);
-                    else
-                        ImGui::Text("%.1f%%", spct);
-                    ImGui::TableNextColumn();
-                    if (nc)
-                        ImGui::Text("%.2f", avg * 1000.0 / (double)nc);
-                    else
-                        ImGui::TextDisabled("-");
-                    ImGui::TableNextColumn();
-                    ImGui::Text("%.3f", g_prof_disp_max_ms[i]);
-                    ImGui::TableNextColumn();
-                    ImGui::Text("%u", nc);
-                }
-                ImGui::EndTable();
-            }
-            ImGui::PopTextWrapPos();
-            ImGui::Separator();
-            ImGui::TextColored({ 1, 0.85f, 0.4f, 1 }, "HOT PATH -- busiest thread %u: %.3f ms/frame (%.1f%% of frame), of %d thread(s)",
-                g_prof_disp_thread_max_tid, g_prof_disp_thread_max_ms,
-                fra > 0.0 ? 100.0 * g_prof_disp_thread_max_ms / fra : 0.0,
-                g_prof_disp_thread_count);
-            ImGui::PushTextWrapPos(-1.0f); // same reason as the table above: cells are columns, not prose
-            if (g_prof_disp_hot_n > 0 && ImGui::BeginTable("profhot", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_SizingFixedFit)) {
-                ImGui::TableSetupColumn("on that thread");
-                ImGui::TableSetupColumn("self ms");
-                ImGui::TableSetupColumn("% of its gross");
-                ImGui::TableHeadersRow();
-                for (int k = 0; k < g_prof_disp_hot_n; ++k) {
-                    const char* nm = g_prof_names[g_prof_disp_hot_bucket[k]];
-                    while (*nm == ' ') ++nm; // the tree indent is not wanted here
-                    ImGui::TableNextRow();
-                    ImGui::TableNextColumn();
-                    ImGui::TextUnformatted(nm);
-                    ImGui::TableNextColumn();
-                    ImGui::Text("%.3f", g_prof_disp_hot_ms[k]);
-                    ImGui::TableNextColumn();
-                    ImGui::Text("%.0f%%", g_prof_disp_thread_max_ms > 0.0 ? 100.0 * g_prof_disp_hot_ms[k] / g_prof_disp_thread_max_ms : 0.0);
-                }
-                ImGui::EndTable();
-            }
-            ImGui::PopTextWrapPos();
-            if (g_prof_disp_thr_n > 0) {
-                char line[512];
-                int  off = 0;
-                for (int k = 0; k < g_prof_disp_thr_n && off < (int)sizeof(line) - 24; ++k)
-                    off += snprintf(line + off, sizeof(line) - off, "%s%.2f", k ? " | " : "", g_prof_disp_thr_ms[k]);
-                ImGui::TextDisabled("per-thread ms (busiest first): %s", line);
-            }
-            ImGui::Separator();
-            double gpct = fra > 0.0 ? 100.0 * g_prof_disp_total_ms / fra : 0.0;
-            double npct = fra > 0.0 ? 100.0 * g_prof_disp_total_net_ms / fra : 0.0;
-            double opct = fra > 0.0 ? 100.0 * g_prof_disp_overhead_ms / fra : 0.0;
-            ImGui::Text("ADDON CPU, ALL THREADS: %.3f ms (%.1f%% frame)   |   NET (timers removed): %.3f ms (%.1f%%)",
-                g_prof_disp_total_ms, gpct, g_prof_disp_total_net_ms, npct);
-            ImGui::Text("BUSIEST THREAD (what the frame pays): %.3f ms on tid %u, of %d thread(s) with timed work",
-                g_prof_disp_thread_max_ms, g_prof_disp_thread_max_tid, g_prof_disp_thread_count);
-            ImGui::TextColored(opct >= 10.0 ? ImVec4(1, 0.5f, 0.3f, 1) : ImVec4(0.7f, 0.7f, 0.7f, 1),
-                "Profiling overhead (est): %.3f ms (%.1f%% frame)  |  %u scopes/frame x %.1f ns/scope",
-                g_prof_disp_overhead_ms, opct, g_prof_disp_total_calls, g_prof_percall_ns);
-            ImGui::TextColored(g_prof_disp_dc_descs > 50000 ? ImVec4(1, 0.5f, 0.3f, 1) : ImVec4(0.7f, 0.7f, 0.7f, 1),
-                "DescCopy volume/frame: %u copies | %u descriptors walked | %u tex-cand swaps",
-                g_prof_disp_dc_copies, g_prof_disp_dc_descs, g_prof_disp_dc_swaps);
-            // DUMP button: average N seconds and write a text file next to the game exe.
-            bool dumping = g_prof_dump_active.load();
-            if (dumping)
-                ImGui::TextDisabled("Dumping %.0fs...", g_prof_dump_secs);
-            else if (ImGui::Button("Dump profiler to file"))
-                g_prof_dump_request.store(true);
-            ImGui::SetNextItemWidth(90);
-            ImGui::InputDouble("secs", &g_prof_dump_secs, 0, 0, "%.0f");
-            if (g_prof_dump_last[0]) ImGui::TextDisabled("last dump: %s (in game Binaries\\Win64)", g_prof_dump_last);
-            ImGui::TextDisabled("Avg/min/max over last 1s. Indented rows nest inside the hook above (DI:* in DrawIndexed; Drain* in Present) -- not summed twice. NET is the real addon cost; if overhead%% is high, the timers themselves are dragging FPS.");
-            ImGui::Separator();
-            if (!g_prof_mem_have) {
-                ImGui::TextDisabled("Memory: no sample yet (first one lands ~1s after enabling the profiler).");
-            } else {
-                const double MB = 1024.0 * 1024.0;
-                const double vram_pct = g_prof_mem.vram_budget ? 100.0 * (double)g_prof_mem.vram_usage / (double)g_prof_mem.vram_budget : 0.0;
-                const double d_vram = ((double)(int64_t)g_prof_mem.vram_usage - (double)(int64_t)g_prof_mem_base.vram_usage) / MB;
-                const double d_host = ((double)(int64_t)g_prof_mem.host_usage - (double)(int64_t)g_prof_mem_base.host_usage) / MB;
-                const double d_priv = ((double)(int64_t)g_prof_mem.proc_private - (double)(int64_t)g_prof_mem_base.proc_private) / MB;
-                ImGui::TextColored(vram_pct >= 100.0 ? ImVec4(1, 0.4f, 0.3f, 1) : (vram_pct >= 90.0 ? ImVec4(1, 0.8f, 0.3f, 1) : ImVec4(0.75f, 0.75f, 0.75f, 1)),
-                    "VRAM (LOCAL)     %6.0f / %6.0f MB (%.0f%% of budget)   peak %6.0f   %+.0f MB since start",
-                    g_prof_mem.vram_usage / MB, g_prof_mem.vram_budget / MB, vram_pct,
-                    g_prof_mem_peak.vram_usage / MB, d_vram);
-                ImGui::TextColored(ImVec4(0.75f, 0.75f, 0.75f, 1),
-                    "HOST (NON_LOCAL) %6.0f / %6.0f MB   peak %6.0f   %+.0f MB since start   <- upload heaps + VRAM spill",
-                    g_prof_mem.host_usage / MB, g_prof_mem.host_budget / MB,
-                    g_prof_mem_peak.host_usage / MB, d_host);
-                ImGui::TextColored(ImVec4(0.75f, 0.75f, 0.75f, 1),
-                    "Process private  %6.0f MB (WS %.0f MB)   peak %6.0f   %+.0f MB over %.0f s",
-                    g_prof_mem.proc_private / MB, g_prof_mem.proc_ws / MB,
-                    g_prof_mem_peak.proc_private / MB, d_priv, g_prof_mem_age_s);
-                ImGui::TextDisabled("tables: va_to_res %u (start %u) | res_to_va %u (%u) | cmd_state %u (%u) | sk_pending %u | geomods %u",
-                    g_prof_mem.n_va_to_res, g_prof_mem_base.n_va_to_res,
-                    g_prof_mem.n_res_to_va, g_prof_mem_base.n_res_to_va,
-                    g_prof_mem.n_cmd_state, g_prof_mem_base.n_cmd_state,
-                    g_prof_mem.n_sk_pending, g_prof_mem.n_geomods);
-                const bool staging_hot = g_prof_mem.staging_cap &&
-                    g_prof_mem.staging_used >= (g_prof_mem.staging_cap * 3 / 4);
-                ImGui::TextColored(staging_hot ? ImVec4(1, 0.5f, 0.3f, 1) : ImVec4(0.55f, 0.55f, 0.55f, 1),
-                    "port heaps: staging %u/%u high-water (%u free-listed) | rootsigs %u | PSOs %u | heap mirrors %u = %.1f MB",
-                    g_prof_mem.staging_used, g_prof_mem.staging_cap, g_prof_mem.staging_freed,
-                    g_prof_mem.n_rootsigs, g_prof_mem.n_psos,
-                    g_prof_mem.n_heap_maps, g_prof_mem.heap_map_bytes / MB);
-            }
-        } else {
-            ImGui::TextDisabled("Profiler off: frame-time/fps above is still live (zero overhead). "
-                                "Enable it to sample memory/VRAM -- the baseline latches when you do.");
-        }
+    ImGui::Separator();
+    {
+        bool perf = g_prof_enabled;
+        if (NCheckbox("A17", "Performance monitor: what the add-on costs, live (measuring costs a little itself)", &perf))
+            g_prof_enabled = perf;
     }
+    if (g_prof_enabled) {
+        DrawPerformanceSummary();
+        if (g_perf.ReportRunning())
+            ImGui::TextColored({ 1, 1, 0, 1 }, "Recording the report: %.0f s left", g_perf.ReportSecondsLeft());
+        else if (NButton("A18", "Save a 10-second performance report next to wwmi_dx12_addon.log"))
+            g_perf.RequestReport();
+        if (!g_perf.LastReport().empty()) ImGui::TextDisabled("Saved: %s", g_perf.LastReport().c_str());
+        if (g_perf.HaveShown() && ImGui::CollapsingHeader("Performance details")) DrawPerformanceDetails(g_perf.Shown());
+    }
+#ifdef WWMI_DEBUG
     ImGui::Separator();
 
     ImGui::Separator();
@@ -463,11 +621,8 @@ void DrawOverlay(effect_runtime*)
             &MigotoPort::g_inherit_game_viewport);
         NCheckbox("B13", "Pre/post SPLIT: run post lists after the draw (off = old inline behaviour)",
             &MigotoPort::g_port_post_split);
-        if (NCheckbox("B14", "Mod buffers in VRAM (off = in system RAM, read over PCIe as before; applies at the next launch, or reload B1)",
-                &MigotoPort::g_buffers_in_vram) &&
-            !g_addon_ini_path.empty())
-            WritePrivateProfileStringW(L"wwmi-dx12", L"buffers_in_vram", MigotoPort::g_buffers_in_vram ? L"1" : L"0",
-                g_addon_ini_path.c_str());
+        NCheckbox("B21", "Put the game's state back once after a run of mod compute work, not after every dispatch and copy",
+            &MigotoPort::g_lazy_restore);
         if (NButton("B15", "Log merged-blend draws (8 frames)")) g_log_merged.store(8);
         NCheckbox("B16", "Hide UNCLAIMED char draws (shadow/LOD proxy) [clone test]", &g_hide_unclaimed_char);
         {

@@ -2,6 +2,7 @@
 #include <string>
 #include <atomic>
 #include <unordered_map>
+#include <vector>
 #include <share.h>
 #include <locale.h> // _create_locale / _locale_t for the per-call UTF-8 formatting locale
 
@@ -10,11 +11,45 @@ namespace logger {
 FILE*            g_log_file = nullptr;
 CRITICAL_SECTION g_log_cs;
 bool             g_log_inited = false;
+std::wstring     g_log_path;
+
+DWORD copy_to(const wchar_t* dst)
+{
+    if (!g_log_inited) return ERROR_FILE_NOT_FOUND;
+    HANDLE in = CreateFileW(g_log_path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (in == INVALID_HANDLE_VALUE) return GetLastError();
+    HANDLE out = CreateFileW(dst, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (out == INVALID_HANDLE_VALUE) {
+        const DWORD err = GetLastError();
+        CloseHandle(in);
+        return err;
+    }
+    DWORD             err = ERROR_SUCCESS;
+    std::vector<char> buf(1 << 20);
+    for (;;) {
+        DWORD got = 0;
+        if (!ReadFile(in, buf.data(), (DWORD)buf.size(), &got, nullptr)) {
+            err = GetLastError();
+            break;
+        }
+        if (!got) break;
+        DWORD put = 0;
+        if (!WriteFile(out, buf.data(), got, &put, nullptr) || put != got) {
+            err = GetLastError();
+            break;
+        }
+    }
+    CloseHandle(out);
+    CloseHandle(in);
+    return err;
+}
 
 void init(const wchar_t* log_path)
 {
     if (g_log_inited) return;
     InitializeCriticalSection(&g_log_cs);
+    g_log_path = log_path;
     {
         std::wstring prev(log_path);
         size_t       dot = prev.find_last_of(L'.');
