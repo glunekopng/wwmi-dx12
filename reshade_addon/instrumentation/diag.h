@@ -5,6 +5,7 @@
 #include <mutex>
 #include <map>
 #include <utility>
+#include <vector>
 #include "../../src/fnv.h"
 #include "../../src/log.h"
 
@@ -96,7 +97,22 @@ inline unsigned long long DiagFnv(const char* s)
 }
 
 inline std::atomic<uint32_t> g_probe_until{ 0 }; // probes may fire while g_frame_id < this
-inline bool                  ProbeArmed()
+inline std::atomic<int>      g_present_log_left{ 0 }; // B23: presents still to log (PRESENTLOG)
+inline std::atomic<uint32_t> g_present_log_draws{ 0 };
+inline std::atomic<uint32_t> g_present_log_execs{ 0 };
+inline std::atomic<uint32_t> g_frame_end_draws{ 0 }; // B23: game draws since the last FRAMEEND
+inline std::atomic<int64_t>  g_present_log_qpc{ 0 };
+struct PresentLogSubmitter {
+    uint32_t tid = 0;
+    uint64_t queue = 0;
+    uint32_t lists = 0;
+    uint32_t claimed = 0;
+    int64_t  last_qpc = 0;
+};
+inline std::mutex                       g_present_log_mtx;
+inline std::vector<PresentLogSubmitter> g_present_log_subs; // B23: who submitted since the last present
+inline std::vector<uint64_t>            g_present_log_bbs;  // B23: the swapchain's back buffers
+inline bool                ProbeArmed()
 {
     return g_frame_id < g_probe_until.load(std::memory_order_relaxed);
 }
