@@ -10,7 +10,6 @@
 #include "draw_parts.h"
 #include "read_slots.h"
 #include "../instrumentation/tex_timing.h"
-#include "../textures/tex_eager.h"
 #include <bitset>
 #include <optional>
 
@@ -116,7 +115,6 @@ static void NoteClaimedMod(int mod_id)
         PortApi::SetVarSlot(ds.slot, 1.f);
     }
     TexTiming::NoteClaimed(mod_id, det_ns.c_str());
-    g_tex_eager.OnClaimed(mod_id, det_ns.c_str(), "first claimed draw");
 }
 
 void StampClaimedTextures(const DrawArgs& da, DrawClaim& dc)
@@ -188,7 +186,7 @@ void StampClaimedTextures(const DrawArgs& da, DrawClaim& dc)
                 ID3D12Resource* res = local_res[s];
                 if (!res) continue;
                 if (rs.known[p] && !rs.want[p].test(s)) continue;
-                const int sel = local_hash[s] ? TexSelectIdxNs(local_hash[s], own_ns) : -1;
+                const int sel = local_hash[s] ? TexSelectIdxNs(local_hash[s], own_ns, 0) : -1;
                 if (g_texflip_arm.load(std::memory_order_relaxed) > 0) {
                     struct Seen {
                         ID3D12Resource* res;
@@ -296,7 +294,7 @@ void StampClaimedTextures(const DrawArgs& da, DrawClaim& dc)
                 if (rep.ptr == 0) {
                     const uint32_t      tgt = TexLodTargetOf(hash);
                     ModLoader::TexEntry alias_entry;
-                    if (tgt && ModLoader::TexEntryAt(TexSelectIdxNs(tgt, own_ns), &alias_entry)) {
+                    if (tgt && ModLoader::TexEntryAt(TexSelectIdxNs(tgt, own_ns, TexDrawnMip(hash, tgt)), &alias_entry)) {
                         rep = alias_entry.srv;
                         rep_res = alias_entry.res;
                         swap_rule = tgt;
@@ -313,6 +311,7 @@ void StampClaimedTextures(const DrawArgs& da, DrawClaim& dc)
                     D3D12_CPU_DESCRIPTOR_HANDLE dst = { heap->GetCPUDescriptorHandleForHeapStart().ptr + (SIZE_T)slot * inc };
                     dev->CopyDescriptorsSimple(1, dst, rep, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
                     g_heap_to_res.set_swapped({ ts.heap, slot }, rep_res); // the frame dump publishes what the GPU reads
+                    StampedStoreTexture(ts.heap, slot, rep_res);
                     ++g_tex_inject_count;
                     TexTiming::NoteSwapped(rep_res, swap_rule);
                 }

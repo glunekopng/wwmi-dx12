@@ -38,6 +38,7 @@ struct SectionPsSlot {
     uint32_t                    slot = 0;
     D3D12_CPU_DESCRIPTOR_HANDLE src{ 0 };
     ID3D12Resource*             res = nullptr;
+    bool                        stored = false; // res is in the texture store: checked after the stamp
 };
 // The section's own ps-tN for one injected draw, each resolved to the slot of the game's table it lands in
 // (section_ps_stamp.cpp).
