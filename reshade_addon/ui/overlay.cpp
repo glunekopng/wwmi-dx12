@@ -574,11 +574,11 @@ void DrawOverlay(effect_runtime*)
         VerboseArm(600);
     if (logger::unlimited())
         ImGui::TextColored({ 1, 1, 0, 1 }, "verbose log ON");
-    if (NButton("B1", "Reload mods (re-reads every mod ini)")) {
+#endif
+    if (NButton("B1", "Reload mods (re-reads every mod ini) -- also F11 in game")) {
         g_reload_requested.store(true);
         logger::write("RELOAD: requested from overlay -- will run at the next frame boundary");
     }
-#endif
     ImGui::Separator();
     {
         bool perf = g_prof_enabled;
