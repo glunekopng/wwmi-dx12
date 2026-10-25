@@ -103,6 +103,17 @@ bool Load(const wchar_t* ini_root)
     return true;
 }
 
+void RequestConfigReload()
+{
+    if (!g_loaded) return;
+    // Exactly what their reload_config hotkey does: only set the flag. PresentPre() -> FrameDriverConfig()
+    // runs ReloadConfig() (clear key bindings, save d3dx_user.ini, LoadConfigFile(), optimise command
+    // lists, mark every shader unprocessed) plus RebuildParseSnapshots() on a thread that may do that,
+    // and bumps the generation. Doing it here instead would re-parse under the present lock.
+    FlagConfigReload(&g_dev, nullptr); // second argument = wipe the user config; we never do
+    logger::write("PORT: config reload requested -- d3dx.ini and its include tree re-parse at the next present");
+}
+
 void SaveSettingsOnExit()
 {
     if (!g_loaded) {
