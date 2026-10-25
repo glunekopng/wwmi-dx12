@@ -17,6 +17,10 @@
 #include "../textures/tex_budget.h"
 #include "../textures/tex_encode.h"
 
+// Defined in migoto/port_api.cpp. Declared here as well so this file compiles without the declaration
+// having to reach migoto/port_api.h: the call site then depends on one file, not two in lockstep.
+namespace PortApi { void RequestConfigReload(); }
+
 static bool GameKeyDown(int vk)
 {
     DWORD pid = 0;
