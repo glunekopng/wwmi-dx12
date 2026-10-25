@@ -230,3 +230,25 @@ void LoadGeometryMods()
         g_geom_loaded = true;
     }
 }
+
+// Manual reload (B1 / F11): LoadGeometryMods() only ever runs once, so without this the geometry units keep
+// describing the PREVIOUS parse -- mods added or disabled since then would never reach a character's model,
+// while the ini side (texture overrides, sections) is rebuilt by the reload. Drop the bookkeeping so the
+// next LoadGeometryMods() reads the new mod tree. Their buffers are the engine's, not ours (Resource::res is
+// unowned), so nothing is freed here; g_merged_loaded stays set and the shared identity CB is reused.
+void ResetGeometryMods()
+{
+    if (!g_geom_loaded) return;
+    logger::write("RELOAD: dropping %zu geometry unit(s) / %zu merged component(s) -- the next present rebuilds "
+                  "them from the new parse",
+        g_geomods.size(), g_merged_comps.size());
+    g_geomods.clear();
+    g_ns_to_mod.clear();
+    g_merged_comps.clear();
+    g_first_to_comp.clear();
+    g_first_to_shared.clear();
+    g_ibhash_slot.clear();
+    g_mod_index_end.clear();
+    g_ps_slot_queries.store(false, std::memory_order_relaxed);
+    g_geom_loaded = false;
+}

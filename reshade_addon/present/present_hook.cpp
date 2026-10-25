@@ -180,6 +180,7 @@ static void FrameStep(command_queue* queue, swapchain* sc, bool at_present)
             s_parse_gen = parse_gen;
             ModLoader::Reload(); // -> g_reload_pending, applied by Tick() just below
             g_texovr_ready = false; // texture overrides and the SRV heap get rebuilt from the new parse
+            ResetGeometryMods(); // the model side too: LoadGeometryMods() below rebuilds it from the same parse
             logger::write("RELOAD: parse generation %u -- re-reading the mod tree, rebuilding overrides", parse_gen);
         }
     }

@@ -20,6 +20,7 @@ void               ModTexturesTick();                                           
 void               Heartbeat(uint32_t texinj_last);                                                  // present_diag.cpp
 void               HealthHeartbeat();                                                                // present_diag.cpp
 void               LoadGeometryMods();                                                               // present_mod_load.cpp
+void               ResetGeometryMods();                                                              // present_mod_load.cpp
 
 extern std::wstring g_cfg_engine_path;
 extern std::wstring g_cfg_db_path;
