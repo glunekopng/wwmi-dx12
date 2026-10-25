@@ -121,6 +121,15 @@ void on_present_body(command_queue* queue, swapchain* sc)
         if (f6 && !s_f6 && !g_rt_blocked && !g_faulted) SetAddonDisabled(!g_addon_disabled.load());
         s_f6 = f6;
     }
+    { // F11 (no modifiers) reloads every mod ini: same path as the B1 button, kept out of WWMI_DEBUG so it ships.
+        static bool s_f11 = false;
+        const bool  f11 = GameKeyDown(VK_F11);
+        if (f11 && !s_f11 && !g_rt_blocked && !g_faulted) {
+            g_reload_requested.store(true);
+            logger::write("RELOAD: requested by F11 -- will run at the next frame boundary");
+        }
+        s_f11 = f11;
+    }
     VerboseTick();
     if (g_addon_disabled) return;
 #ifdef WWMI_DEBUG
