@@ -17,6 +17,10 @@ namespace PortApi {
 
 bool Load(const wchar_t* ini_root);
 void SaveSettingsOnExit();
+// Queues their engine's own config reload (the same routine their reload_config hotkey drives): d3dx.ini
+// and its whole include tree are re-parsed from disk at the next present. Harmless once already loaded;
+// a no-op before Load(). LoadGeneration() bumps when the parse is done, so callers can rebuild from it.
+void RequestConfigReload();
 
 void SetFrameContext(ID3D12Device* dev, ID3D12GraphicsCommandList* cl, ID3D12CommandQueue* queue,
     unsigned rt_width, unsigned rt_height,
