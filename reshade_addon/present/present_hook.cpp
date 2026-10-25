@@ -163,11 +163,21 @@ static void FrameStep(command_queue* queue, swapchain* sc, bool at_present)
     ConfigWatchTick();
     UpdateSkinBand(); // keep the skin-pool VA band tracking the learned char VB0s (auto re-derive across patches)
     SeedHeartbeat();
-    // Manual reload (B1) runs on the render thread, at the frame boundary.
+    // Manual reload (B1 / F11). Their engine owns the parse, so ask it for its own config reload: it
+    // re-reads d3dx.ini and every include from disk at the next present and bumps the generation.
     if (g_reload_requested.exchange(false)) {
-        ModLoader::Reload(); // -> g_reload_pending, applied by Tick() just below
-        g_texovr_ready = false;
-        logger::write("RELOAD: engine state cleared (g_texovr_ready=0) -- inis will be re-parsed");
+        PortApi::RequestConfigReload();
+        logger::write("RELOAD: requested -- their engine re-parses the mod tree at the next present");
+    }
+    { // When that parse lands (generation moved, whether we asked or they did), rebuild what came from it.
+        static unsigned s_parse_gen = 0;
+        const unsigned  parse_gen = PortApi::LoadGeneration();
+        if (parse_gen != s_parse_gen) {
+            s_parse_gen = parse_gen;
+            ModLoader::Reload(); // -> g_reload_pending, applied by Tick() just below
+            g_texovr_ready = false; // texture overrides and the SRV heap get rebuilt from the new parse
+            logger::write("RELOAD: parse generation %u -- re-reading the mod tree, rebuilding overrides", parse_gen);
+        }
     }
     ModLoader::Tick();
     if (!g_skip_engine_tick) EngineFrameTick(queue, sc, at_present);
