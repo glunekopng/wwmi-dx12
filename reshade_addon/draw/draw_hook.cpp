@@ -9,6 +9,12 @@
 #include "draw_parts.h"
 #include "../instrumentation/hot_path.h"
 #include <optional>
+#include <atomic> // v6: g_reload_gate
+
+// v6: present_hook.cpp owns the gate. While a mod switch re-parses the ini tree,
+// executing a section from the outgoing parse can dereference a freed vtable
+// (see wwmi_dx12_crash.log, 2026-11-07 18:23:26). Short out the whole draw path.
+extern std::atomic<bool> g_reload_gate;
 
 thread_local uint8_t  t_x23_claimed = 0;
 thread_local uint8_t  t_x23_shadow = 0;
@@ -21,6 +27,7 @@ bool on_draw_indexed_body(command_list* cmd_list, uint32_t index_count, uint32_t
 {
     PROF(PROF_DrawIndexed);
     if (g_addon_disabled || g_faulted || !g_is_dx12) return false;
+    if (g_reload_gate.load(std::memory_order_acquire)) return false; // v6: hot reload in flight
     MigotoPort::FrameAnalysisDrawScope fa_scope;
     uint64_t                           vs_hash = 0;
     cmd_list->get_private_data(s_iid_vs_hash, &vs_hash);
