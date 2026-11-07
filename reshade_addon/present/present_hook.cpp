@@ -30,8 +30,11 @@ static bool GameKeyDown(int vk)
 }
 
 static std::atomic<swapchain*> g_step_sc{ nullptr };
-// v5: F10 forces one switch through immediately, bypassing the coalescing cooldown.
+// v6: F10 forces one switch through immediately, bypassing the coalescing cooldown.
 static std::atomic<bool>       g_reload_force{ false };
+// v6: owned here, read by draw/draw_hook.cpp. Set from the re-parse request until the
+// texture + geometry rebuild has finished; no draw may execute a section while set.
+std::atomic<bool>              g_reload_gate{ false };
 
 static void FrameStep(command_queue* queue, swapchain* sc, bool at_present);
 
@@ -136,7 +139,7 @@ void on_present_body(command_queue* queue, swapchain* sc)
         }
         s_f11 = f11;
     }
-    { // F10 (v5): the same switch, but skip the cooldown. Use it when you deliberately
+    { // F10 (v6): the same switch, but skip the cooldown. Use it when you deliberately
         // want one immediate switch after the previous reload has visibly settled.
         static bool s_f10 = false;
         const bool  f10 = GameKeyDown(VK_F10);
@@ -180,18 +183,16 @@ static void FrameStep(command_queue* queue, swapchain* sc, bool at_present)
     ConfigWatchTick();
     UpdateSkinBand(); // keep the skin-pool VA band tracking the learned char VB0s (auto re-derive across patches)
     SeedHeartbeat();
-    // ---- v5: coalesced, staged, race-free hot reload -------------------------------
-    // Their engine's FrameDriverConfig() bumps LoadGeneration() TWICE for a single parse
-    // (once before and once after ReloadConfig), and ReloadConfig() re-reads the whole
-    // include tree, re-optimises every command list and marks every shader unprocessed,
-    // all synchronously on the render thread. Rocket renames mod folders in bursts and
-    // F11 is easy to repeat, so v4 could stack several full re-parses and clear BOTH the
-    // texture and the geometry ledgers inside one frame -- the geometry ledgers then
-    // stayed empty through a whole frame of engine/draw work until LoadGeometryMods()
-    // ran at the tail. That combination is what intermittently froze the game.
-    // v5 rules: one re-parse per cooldown, wait for the generation to settle, rebuild
-    // textures and geometry on separate frames, and clear the geometry ledgers in the
-    // SAME statement block as their rebuild (no engine work sees the empty tables).
+    // ---- v6: coalesced, gated hot reload ---------------------------------------------
+    // v5 split the texture and geometry rebuilds across two frames. That left one
+    // whole frame where section tables came from the NEW parse while the geometry
+    // ledgers still described the OLD one; on 2026-11-07 a draw then executed
+    // TextureOverride\cx_Mod042\Component4 through a stale vtable and faulted
+    // (0xC0000005 in on_draw_indexed_guarded), latching g_faulted and turning every
+    // mod off until restart.
+    // v6: one parse -> ONE rebuild frame, and the draw path is gated from the moment
+    // the re-parse is requested until that rebuild has finished. No draw ever sees a
+    // half-switched state.
     static const ULONGLONG kReloadCooldownMs = 1500;
     static ULONGLONG       s_last_req_ms     = 0;
     static ULONGLONG       s_reload_start_ms = 0;
@@ -199,52 +200,56 @@ static void FrameStep(command_queue* queue, swapchain* sc, bool at_present)
     static unsigned        s_known_gen       = 0;
     static unsigned        s_settle_gen      = 0;
     static unsigned        s_settle_frames   = 0;
-    static int             s_stage           = 0; // 0 idle | 1 textures | 2 geometry
+    static unsigned        s_gate_frames     = 0;
     const ULONGLONG        now_ms            = GetTickCount64();
-    const bool             busy              = s_stage != 0;
+    const bool             busy              = g_reload_gate.load(std::memory_order_acquire);
+
+    // Safety net: a stalled parse must never mute the mods forever.
+    if (busy) {
+        if (++s_gate_frames > 600) {
+            s_gate_frames = 0;
+            g_reload_gate.store(false, std::memory_order_release);
+            logger::write("RELOAD: gate timed out after 600 frames -- draw path forcibly resumed");
+        }
+    } else s_gate_frames = 0;
 
     if (g_reload_requested.exchange(false)) {
         const bool force = g_reload_force.exchange(false);
         if (busy) {
-            s_deferred = true; // a switch made mid-rebuild: honour it exactly once afterwards
+            s_deferred = true; // a switch made mid-reload: honour it exactly once afterwards
         } else if (force || now_ms - s_last_req_ms >= kReloadCooldownMs) {
             s_last_req_ms = now_ms;
             s_reload_start_ms = now_ms;
             s_deferred = false;
+            g_reload_gate.store(true, std::memory_order_release); // no draws until the rebuild lands
             PortApi::RequestConfigReload();
-            logger::write("RELOAD: requested%s -- their engine re-parses the mod tree at the next present",
+            logger::write("RELOAD: requested%s -- draw path gated, their engine re-parses at the next present",
                 force ? " (forced)" : "");
         } // else: a repeat inside the cooldown is dropped, not stacked
     } else if (s_deferred && !busy && now_ms - s_last_req_ms >= kReloadCooldownMs) {
         s_last_req_ms = now_ms;
         s_reload_start_ms = now_ms;
         s_deferred = false;
+        g_reload_gate.store(true, std::memory_order_release);
         PortApi::RequestConfigReload();
-        logger::write("RELOAD: coalesced switch -- re-parsing after the previous reload settled");
+        logger::write("RELOAD: coalesced switch -- gated re-parse after the previous reload settled");
     }
 
-    bool geom_rebuild_now = false;
+    bool rebuild_now = false;
     {
         const unsigned gen = PortApi::LoadGeneration();
         if (gen != s_settle_gen) { s_settle_gen = gen; s_settle_frames = 0; }
         else if (s_settle_frames < 8) ++s_settle_frames;
 
-        if (s_stage == 0 && s_settle_frames >= 3 && gen != s_known_gen) {
+        if (s_settle_frames >= 3 && gen != s_known_gen) {
             s_known_gen = gen;
-            s_stage = 1;
-            logger::write("RELOAD: parse generation %u settled -- staged rebuild", gen);
+            rebuild_now = true;
+            logger::write("RELOAD: parse generation %u settled -- rebuilding textures and geometry", gen);
         }
     }
-    if (s_stage == 1) {
+    if (rebuild_now) {
         ModLoader::Reload();      // -> g_reload_pending, applied by Tick() just below
         g_texovr_ready = false;   // ModTexturesTick() republishes the rules this frame
-        s_stage = 2;
-        logger::write("RELOAD: stage 1/2 -- texture rules re-published");
-    } else if (s_stage == 2) {
-        geom_rebuild_now = true;  // acted on at the tail, immediately before LoadGeometryMods()
-        s_stage = 0;
-        logger::write("RELOAD: stage 2/2 -- geometry rebuilt in %lu ms",
-            (unsigned long)(now_ms - s_reload_start_ms));
     }
     // ---------------------------------------------------------------------------------
     ModLoader::Tick();
@@ -315,14 +320,20 @@ static void FrameStep(command_queue* queue, swapchain* sc, bool at_present)
         int                     f = g_tex_flicker_watch.load(std::memory_order_relaxed);
         if (f > 0) g_tex_flicker_watch.store(f - 1, std::memory_order_relaxed);
     }
-    if (geom_rebuild_now) ResetGeometryMods(); // v5: no engine/draw work sees the empty ledgers
+    if (rebuild_now) ResetGeometryMods(); // v6: cleared immediately before its rebuild
     LoadGeometryMods();
+    if (rebuild_now) {
+        s_gate_frames = 0;
+        g_reload_gate.store(false, std::memory_order_release);
+        logger::write("RELOAD: complete in %lu ms -- draw path resumed",
+            (unsigned long)(GetTickCount64() - s_reload_start_ms));
+    }
     PROF(PROF_PresTail); // on_present's tail: shapekey / ibhash drain / diag
     SkRefreshModHashes();
     MigotoPort::SkCapDrain();
     {
         PROF(PROF_IbHashDrain);
-        if (!geom_rebuild_now) IbHash::DrainQueue(); // v5: let the fresh ledgers settle one frame
+        if (!rebuild_now) IbHash::DrainQueue(); // v6: let the fresh ledgers settle one frame
     } // GPU IB-hash anchor: hash queued char IBs (bounded, cached) -- needed in prod too
     if (g_debug) {
         PROF(PROF_DiagPresent);
